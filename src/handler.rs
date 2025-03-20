@@ -1,15 +1,12 @@
 use crate::{
-    config::{self, Configuration},
-    constant,
-    generation::{self, Token},
-    util::{self, run_and_report_error, DiscordInteraction},
+    config, constant,
+    util::{self, DiscordInteraction as _},
 };
 use anyhow::Context as AnyhowContext;
 use serenity::{
     async_trait,
     builder::CreateComponents,
     client::{Context, EventHandler},
-    futures::StreamExt,
     http::Http,
     model::{
         application::interaction::Interaction,
@@ -22,25 +19,24 @@ use serenity::{
         },
     },
 };
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
+use tokio_stream::StreamExt;
 
 pub struct Handler {
-    _model_thread: std::thread::JoinHandle<()>,
-    config: Configuration,
-    request_tx: flume::Sender<generation::Request>,
-    cancel_tx: flume::Sender<MessageId>,
+    model: Arc<mistralrs::Model>,
+    config: config::Configuration,
+    cancel_tx: tokio::sync::broadcast::Sender<MessageId>,
+    cancel_rx: tokio::sync::broadcast::Receiver<MessageId>,
 }
 impl Handler {
-    pub fn new(config: Configuration, model: Box<dyn llm::Model>) -> Self {
-        let (request_tx, request_rx) = flume::unbounded::<generation::Request>();
-        let (cancel_tx, cancel_rx) = flume::unbounded::<MessageId>();
+    pub fn new(config: config::Configuration, model: mistralrs::Model) -> Self {
+        let (cancel_tx, cancel_rx) = tokio::sync::broadcast::channel(100);
 
-        let _model_thread = generation::make_thread(model, request_rx, cancel_rx);
         Self {
-            _model_thread,
+            model: Arc::new(model),
             config,
-            request_tx,
             cancel_tx,
+            cancel_rx,
         }
     }
 }
@@ -71,7 +67,8 @@ impl EventHandler for Handler {
                         hallucinate(
                             &cmd,
                             http,
-                            self.request_tx.clone(),
+                            self.model.clone(),
+                            self.cancel_rx.resubscribe(),
                             &self.config.inference,
                             command,
                         ),
@@ -157,7 +154,8 @@ fn create_parameters(
 async fn hallucinate(
     cmd: &ApplicationCommandInteraction,
     http: &Http,
-    request_tx: flume::Sender<generation::Request>,
+    model: Arc<mistralrs::Model>,
+    cancel_rx: tokio::sync::broadcast::Receiver<MessageId>,
     inference: &config::Inference,
     command: &config::Command,
 ) -> anyhow::Result<()> {
@@ -178,12 +176,7 @@ async fn hallucinate(
     let mut outputter = Outputter::new(
         http,
         cmd,
-        Prompts {
-            show_prompt_template: inference.show_prompt_template,
-            processed: command.prompt.replace("{{PROMPT}}", &user_prompt),
-            user: user_prompt,
-            template: command.prompt.clone(),
-        },
+        user_prompt.clone(),
         std::time::Duration::from_millis(inference.discord_message_update_interval_ms),
     )
     .await?;
@@ -191,87 +184,66 @@ async fn hallucinate(
     let message = cmd.get_interaction_message(http).await?;
     let message_id = message.id;
 
-    let seed = util::get_value(options, v::SEED)
+    let _seed = util::get_value(options, v::SEED)
         .and_then(value_to_integer)
         .map(|i| i as u64);
 
-    let (token_tx, token_rx) = flume::unbounded();
-    request_tx.send(generation::Request {
-        prompt: outputter.prompts.processed.clone(),
-        batch_size: inference.batch_size,
-        token_tx,
-        message_id,
-        seed,
-    })?;
-
-    let mut stream = token_rx.into_stream();
+    let request = mistralrs::RequestBuilder::new()
+        .add_message(
+            mistralrs::TextMessageRole::System,
+            command.system_prompt.clone(),
+        )
+        .add_message(mistralrs::TextMessageRole::User, user_prompt);
 
     let mut errored = false;
-    while let Some(token) = stream.next().await {
-        match token {
-            Token::Token(t) => {
-                outputter.new_token(&t).await?;
+    let mut stream = model.stream_chat_request(request).await?;
+
+    let mut cancel_rx_stream = tokio_stream::wrappers::BroadcastStream::new(cancel_rx);
+
+    while let Some(chunk) = stream.next().await {
+        while let Ok(Some(incoming_message_id)) = cancel_rx_stream.try_next().await {
+            if incoming_message_id == message_id {
+                outputter.cancelled().await?;
+                return Ok(());
             }
-            Token::Error(err) => {
-                match err {
-                    generation::InferenceError::Cancelled => outputter.cancelled().await?,
-                    generation::InferenceError::Custom(m) => outputter.error(&m).await?,
-                };
+        }
+
+        let chunk = chunk.as_result();
+        dbg!(&chunk);
+
+        match chunk {
+            Ok(chunk) => {
+                if let mistralrs::ResponseOk::Chunk(mistralrs::ChatCompletionChunkResponse {
+                    choices,
+                    ..
+                }) = chunk
+                {
+                    if let Some(mistralrs::ChunkChoice {
+                        delta:
+                            mistralrs::Delta {
+                                content: Some(content),
+                                ..
+                            },
+                        ..
+                    }) = choices.first()
+                    {
+                        outputter.new_token(content).await?;
+                    };
+                }
+            }
+            Err(e) => {
+                outputter.error(&e.to_string()).await?;
                 errored = true;
                 break;
             }
         }
     }
+
     if !errored {
         outputter.finish().await?;
     }
 
     Ok(())
-}
-
-struct Prompts {
-    show_prompt_template: bool,
-
-    processed: String,
-    user: String,
-    template: String,
-}
-impl Prompts {
-    fn make_markdown_message(&self, message: &str) -> String {
-        let (message, display_prompt) = if !self.show_prompt_template {
-            (self.decouple_prompt_from_message(message), &self.user)
-        } else {
-            (message.to_string(), &self.processed)
-        };
-
-        match message.strip_prefix(display_prompt) {
-            Some(msg) => format!("**{display_prompt}**{msg}"),
-            None => match display_prompt.strip_prefix(&message) {
-                Some(ungenerated) => {
-                    if message.is_empty() {
-                        format!("~~{ungenerated}~~")
-                    } else {
-                        format!("**{message}**~~{ungenerated}~~")
-                    }
-                }
-                None => message.to_string(),
-            },
-        }
-    }
-
-    fn decouple_prompt_from_message(&self, output: &str) -> String {
-        let (prefix, suffix) = self.template.split_once("{{PROMPT}}").unwrap_or_default();
-
-        let prompt = &self.user;
-
-        let Some(message) = output.strip_prefix(prefix) else { return String::new(); };
-        let Some(response) = message.strip_prefix(prompt) else { return message.to_string(); };
-        let Some(response) = response.strip_prefix(suffix) else { return prompt.to_string(); };
-
-        let newline = if suffix.ends_with('\n') { "\n" } else { "" };
-
-        format!("{prompt}{newline}{response}")
-    }
 }
 
 struct Outputter<'a> {
@@ -281,8 +253,8 @@ struct Outputter<'a> {
     messages: Vec<Message>,
     chunks: Vec<String>,
 
+    user_prompt: String,
     message: String,
-    prompts: Prompts,
 
     in_terminal_state: bool,
 
@@ -295,7 +267,7 @@ impl<'a> Outputter<'a> {
     async fn new(
         http: &'a Http,
         cmd: &ApplicationCommandInteraction,
-        prompts: Prompts,
+        user_prompt: String,
         last_update_duration: std::time::Duration,
     ) -> anyhow::Result<Outputter<'a>> {
         cmd.create_interaction_response(http, |response| {
@@ -303,14 +275,7 @@ impl<'a> Outputter<'a> {
                 .kind(InteractionResponseType::ChannelMessageWithSource)
                 .interaction_response_data(|message| {
                     message
-                        .content(format!(
-                            "~~{}~~",
-                            if prompts.show_prompt_template {
-                                &prompts.processed
-                            } else {
-                                &prompts.user
-                            }
-                        ))
+                        .content("Generating...")
                         .allowed_mentions(|m| m.empty_roles().empty_users().empty_parse())
                 })
         })
@@ -324,8 +289,8 @@ impl<'a> Outputter<'a> {
             messages: vec![starting_message],
             chunks: vec![],
 
+            user_prompt,
             message: String::new(),
-            prompts,
 
             in_terminal_state: false,
 
@@ -352,7 +317,7 @@ impl<'a> Outputter<'a> {
         self.chunks = {
             let mut chunks: Vec<String> = vec![];
 
-            let markdown = self.prompts.make_markdown_message(&self.message);
+            let markdown = format!("**{}**\n{}", self.user_prompt, self.message);
             for word in markdown.split(' ') {
                 if let Some(last) = chunks.last_mut() {
                     if last.len() > Self::MESSAGE_CHUNK_SIZE {

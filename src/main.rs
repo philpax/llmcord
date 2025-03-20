@@ -3,7 +3,6 @@ use serenity::{model::prelude::*, Client};
 
 mod config;
 mod constant;
-mod generation;
 mod handler;
 mod util;
 
@@ -13,19 +12,24 @@ use config::Configuration;
 async fn main() -> anyhow::Result<()> {
     let config = Configuration::load()?;
 
-    let model = llm::load_dynamic(
-        config.model.architecture(),
-        &config.model.path,
-        llm::TokenizerSource::Embedded,
-        llm::ModelParameters {
-            prefer_mmap: config.model.prefer_mmap,
-            context_size: config.model.context_token_length,
-            use_gpu: config.model.use_gpu,
-            gpu_layers: config.model.gpu_layers,
-            ..Default::default()
-        },
-        llm::load_progress_callback_stdout,
-    )?;
+    // Split the model path into directory and filename
+    let model_path = &config.model.path;
+    let (directory, filename) = if let Some(parent) = model_path.parent() {
+        (
+            parent.to_string_lossy().to_string(),
+            model_path
+                .file_name()
+                .map_or_else(String::new, |f| f.to_string_lossy().to_string()),
+        )
+    } else {
+        // If there's no parent directory, the entire path is the filename
+        (String::new(), model_path.to_string_lossy().to_string())
+    };
+
+    let model = mistralrs::GgufModelBuilder::new(&directory, vec![&filename])
+        // .with_paged_attn(|| mistralrs::PagedAttentionMetaBuilder::default().build())?
+        .build()
+        .await?;
 
     let mut client = Client::builder(
         config

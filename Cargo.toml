@@ -23,9 +23,15 @@ toml = "0.7.3"
 indoc = "2.0.1"
 thiserror = "1.0"
 
-llm = { git = "https://github.com/rustformers/llm.git", rev = "f7c477c" }
+mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git" }
+tokio-stream = { version = "0.1.17", features = ["sync"] }
 
 [features]
-cublas = ["llm/cublas"]
-clblast = ["llm/clblast"]
-metal = ["llm/metal"]
+default = ["cuda", "cudnn"]
+cuda = ["mistralrs/cuda"]
+cudnn = ["mistralrs/cudnn"]
+metal = ["mistralrs/metal"]
+flash-attn = ["cuda", "mistralrs/flash-attn"]
+accelerate = ["mistralrs/accelerate"]
+mkl = ["mistralrs/mkl"]
+nccl = ["mistralrs/nccl"]
