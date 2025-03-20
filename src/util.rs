@@ -43,6 +43,7 @@ pub fn value_to_integer(v: &CommandDataOptionValue) -> Option<i64> {
 }
 
 #[async_trait]
+#[allow(unused)]
 pub trait DiscordInteraction: Send + Sync {
     async fn create(&self, http: &Http, message: &str) -> anyhow::Result<()>;
     async fn get_interaction_message(&self, http: &Http) -> anyhow::Result<Message>;
