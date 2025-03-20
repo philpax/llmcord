@@ -65,7 +65,7 @@ impl EventHandler for Handler {
                 let commands = &self.config.commands;
 
                 if let Some(command) = commands.get(name) {
-                    run_and_report_error(
+                    util::run_and_report_error(
                         &cmd,
                         http,
                         hallucinate(
@@ -102,7 +102,7 @@ impl EventHandler for Handler {
     }
 }
 
-async fn ready_handler(http: &Http, config: &Configuration) -> anyhow::Result<()> {
+async fn ready_handler(http: &Http, config: &config::Configuration) -> anyhow::Result<()> {
     let registered_commands = Command::get_global_application_commands(http).await?;
     let registered_commands: HashSet<_> = registered_commands
         .iter()
@@ -413,7 +413,9 @@ impl<'a> Outputter<'a> {
         }
 
         // Create new messages for the remaining chunks
-        let Some(first_id) = self.messages.first().map(|m| m.id) else { return Ok(()); };
+        let Some(first_id) = self.messages.first().map(|m| m.id) else {
+            return Ok(());
+        };
         for chunk in self.chunks[self.messages.len()..].iter() {
             let last = self.messages.last_mut().unwrap();
             let msg = last.reply(self.http, chunk).await?;
@@ -438,7 +440,9 @@ impl<'a> Outputter<'a> {
             .await?;
         }
 
-        let Some(last) = self.messages.last_mut() else { return Ok(()); };
+        let Some(last) = self.messages.last_mut() else {
+            return Ok(());
+        };
         last.reply(self.http, error_message).await?;
 
         self.in_terminal_state = true;
