@@ -16,48 +16,24 @@ impl Default for Configuration {
                 discord_token: None,
             },
             model: Model {
-                path: "models/7B/ggml-alpaca-q4_0.bin".into(),
+                path: "your_model.gguf".into(),
                 context_token_length: 2048,
-                architecture: llm::ModelArchitecture::Llama.to_string(),
-                prefer_mmap: true,
                 use_gpu: true,
                 gpu_layers: None,
             },
             inference: Inference {
-                thread_count: 8,
-                batch_size: 8,
                 discord_message_update_interval_ms: 250,
                 replace_newlines: true,
                 show_prompt_template: true,
             },
-            commands: HashMap::from_iter([
-                (
-                    "hallucinate".into(),
-                    Command {
-                        enabled: false,
-                        description: "Hallucinates some text.".into(),
-                        prompt: "{{PROMPT}}".into(),
-                    },
-                ),
-                (
-                    "alpaca".into(),
-                    Command {
-                        enabled: false,
-                        description: "Responds to the provided instruction.".into(),
-                        prompt: indoc::indoc! {
-                            "Below is an instruction that describes a task. Write a response that appropriately completes the request.
-
-                            ### Instruction:
-
-                            {{PROMPT}}
-
-                            ### Response:
-
-                            "
-                        }.into(),
-                    },
-                ),
-            ]),
+            commands: HashMap::from_iter([(
+                "ask".into(),
+                Command {
+                    enabled: false,
+                    description: "Responds to the provided instruction.".into(),
+                    system_prompt: "You are a helpful assistant.".into(),
+                },
+            )]),
         }
     }
 }
@@ -93,8 +69,6 @@ pub struct Authentication {
 pub struct Model {
     pub path: PathBuf,
     pub context_token_length: usize,
-    pub architecture: String,
-    pub prefer_mmap: bool,
     /// Whether or not to use GPU support. Note that `llmcord` must be
     /// compiled with GPU support for this to work.
     pub use_gpu: bool,
@@ -102,20 +76,9 @@ pub struct Model {
     /// If not set, all layers will be offloaded.
     pub gpu_layers: Option<usize>,
 }
-impl Model {
-    pub fn architecture(&self) -> Option<llm::ModelArchitecture> {
-        self.architecture.parse().ok()
-    }
-}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Inference {
-    /// The number of threads to use
-    pub thread_count: usize,
-    /// When the prompt is sent to the model, it will be batched. This
-    /// controls the size of that batch. Larger values will result in
-    /// faster inference, but will use more memory.
-    pub batch_size: usize,
     /// Low values will result in you getting throttled by Discord
     pub discord_message_update_interval_ms: u64,
     /// Whether or not to replace '\n' with newlines
@@ -129,5 +92,5 @@ pub struct Inference {
 pub struct Command {
     pub enabled: bool,
     pub description: String,
-    pub prompt: String,
+    pub system_prompt: String,
 }

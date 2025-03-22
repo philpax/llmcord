@@ -2,9 +2,10 @@ use crate::{
     config::{self, Configuration},
     constant,
     generation::{self, Token},
-    util::{self, run_and_report_error, DiscordInteraction},
+    util::{self, DiscordInteraction},
 };
 use anyhow::Context as AnyhowContext;
+use llama_cpp_2::{llama_backend::LlamaBackend, model::LlamaModel};
 use serenity::{
     async_trait,
     builder::CreateComponents,
@@ -31,11 +32,17 @@ pub struct Handler {
     cancel_tx: flume::Sender<MessageId>,
 }
 impl Handler {
-    pub fn new(config: Configuration, model: Box<dyn llm::Model>) -> Self {
+    pub fn new(config: Configuration, backend: LlamaBackend, model: LlamaModel) -> Self {
         let (request_tx, request_rx) = flume::unbounded::<generation::Request>();
         let (cancel_tx, cancel_rx) = flume::unbounded::<MessageId>();
 
-        let _model_thread = generation::make_thread(model, request_rx, cancel_rx);
+        let _model_thread = generation::make_thread(
+            backend,
+            model,
+            config.model.context_token_length.try_into().unwrap(),
+            request_rx,
+            cancel_rx,
+        );
         Self {
             _model_thread,
             config,
@@ -178,12 +185,7 @@ async fn hallucinate(
     let mut outputter = Outputter::new(
         http,
         cmd,
-        Prompts {
-            show_prompt_template: inference.show_prompt_template,
-            processed: command.prompt.replace("{{PROMPT}}", &user_prompt),
-            user: user_prompt,
-            template: command.prompt.clone(),
-        },
+        user_prompt.clone(),
         std::time::Duration::from_millis(inference.discord_message_update_interval_ms),
     )
     .await?;
@@ -193,12 +195,12 @@ async fn hallucinate(
 
     let seed = util::get_value(options, v::SEED)
         .and_then(value_to_integer)
-        .map(|i| i as u64);
+        .map(|i| i as u32);
 
     let (token_tx, token_rx) = flume::unbounded();
     request_tx.send(generation::Request {
-        prompt: outputter.prompts.processed.clone(),
-        batch_size: inference.batch_size,
+        system_prompt: command.system_prompt.clone(),
+        user_prompt: outputter.user_prompt.clone(),
         token_tx,
         message_id,
         seed,
@@ -216,6 +218,30 @@ async fn hallucinate(
                 match err {
                     generation::InferenceError::Cancelled => outputter.cancelled().await?,
                     generation::InferenceError::Custom(m) => outputter.error(&m).await?,
+                    generation::InferenceError::LlamaContextLoadError(e) => {
+                        outputter.error(&e.to_string()).await?;
+                    }
+                    generation::InferenceError::ChatTemplateError(e) => {
+                        outputter.error(&e.to_string()).await?;
+                    }
+                    generation::InferenceError::ApplyChatTemplateError(e) => {
+                        outputter.error(&e.to_string()).await?;
+                    }
+                    generation::InferenceError::NewLlamaChatMessageError(e) => {
+                        outputter.error(&e.to_string()).await?;
+                    }
+                    generation::InferenceError::StringToTokenError(e) => {
+                        outputter.error(&e.to_string()).await?;
+                    }
+                    generation::InferenceError::DecodeError(e) => {
+                        outputter.error(&e.to_string()).await?;
+                    }
+                    generation::InferenceError::TokenToStringError(e) => {
+                        outputter.error(&e.to_string()).await?;
+                    }
+                    generation::InferenceError::BatchAddError(e) => {
+                        outputter.error(&e.to_string()).await?;
+                    }
                 };
                 errored = true;
                 break;
@@ -229,51 +255,6 @@ async fn hallucinate(
     Ok(())
 }
 
-struct Prompts {
-    show_prompt_template: bool,
-
-    processed: String,
-    user: String,
-    template: String,
-}
-impl Prompts {
-    fn make_markdown_message(&self, message: &str) -> String {
-        let (message, display_prompt) = if !self.show_prompt_template {
-            (self.decouple_prompt_from_message(message), &self.user)
-        } else {
-            (message.to_string(), &self.processed)
-        };
-
-        match message.strip_prefix(display_prompt) {
-            Some(msg) => format!("**{display_prompt}**{msg}"),
-            None => match display_prompt.strip_prefix(&message) {
-                Some(ungenerated) => {
-                    if message.is_empty() {
-                        format!("~~{ungenerated}~~")
-                    } else {
-                        format!("**{message}**~~{ungenerated}~~")
-                    }
-                }
-                None => message.to_string(),
-            },
-        }
-    }
-
-    fn decouple_prompt_from_message(&self, output: &str) -> String {
-        let (prefix, suffix) = self.template.split_once("{{PROMPT}}").unwrap_or_default();
-
-        let prompt = &self.user;
-
-        let Some(message) = output.strip_prefix(prefix) else { return String::new(); };
-        let Some(response) = message.strip_prefix(prompt) else { return message.to_string(); };
-        let Some(response) = response.strip_prefix(suffix) else { return prompt.to_string(); };
-
-        let newline = if suffix.ends_with('\n') { "\n" } else { "" };
-
-        format!("{prompt}{newline}{response}")
-    }
-}
-
 struct Outputter<'a> {
     http: &'a Http,
 
@@ -282,7 +263,7 @@ struct Outputter<'a> {
     chunks: Vec<String>,
 
     message: String,
-    prompts: Prompts,
+    user_prompt: String,
 
     in_terminal_state: bool,
 
@@ -295,7 +276,7 @@ impl<'a> Outputter<'a> {
     async fn new(
         http: &'a Http,
         cmd: &ApplicationCommandInteraction,
-        prompts: Prompts,
+        user_prompt: String,
         last_update_duration: std::time::Duration,
     ) -> anyhow::Result<Outputter<'a>> {
         cmd.create_interaction_response(http, |response| {
@@ -303,14 +284,7 @@ impl<'a> Outputter<'a> {
                 .kind(InteractionResponseType::ChannelMessageWithSource)
                 .interaction_response_data(|message| {
                     message
-                        .content(format!(
-                            "~~{}~~",
-                            if prompts.show_prompt_template {
-                                &prompts.processed
-                            } else {
-                                &prompts.user
-                            }
-                        ))
+                        .content("Generating...")
                         .allowed_mentions(|m| m.empty_roles().empty_users().empty_parse())
                 })
         })
@@ -325,7 +299,7 @@ impl<'a> Outputter<'a> {
             chunks: vec![],
 
             message: String::new(),
-            prompts,
+            user_prompt,
 
             in_terminal_state: false,
 
@@ -352,7 +326,7 @@ impl<'a> Outputter<'a> {
         self.chunks = {
             let mut chunks: Vec<String> = vec![];
 
-            let markdown = self.prompts.make_markdown_message(&self.message);
+            let markdown = format!("**{}**\n{}", self.user_prompt, self.message);
             for word in markdown.split(' ') {
                 if let Some(last) = chunks.last_mut() {
                     if last.len() > Self::MESSAGE_CHUNK_SIZE {
