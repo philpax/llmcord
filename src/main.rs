@@ -1,13 +1,8 @@
 use anyhow::Context as AnyhowContext;
-use llama_cpp_2::{
-    llama_backend::LlamaBackend,
-    model::{params::LlamaModelParams, LlamaModel},
-};
 use serenity::{model::prelude::*, Client};
 
 mod config;
 mod constant;
-mod generation;
 mod handler;
 mod util;
 
@@ -17,13 +12,23 @@ use config::Configuration;
 async fn main() -> anyhow::Result<()> {
     let config = Configuration::load()?;
 
-    let backend = LlamaBackend::init()?;
-    let mut params = LlamaModelParams::default();
-    if config.model.use_gpu {
-        params = params.with_n_gpu_layers(config.model.gpu_layers.unwrap_or(1000) as u32);
+    let mut openai_config = async_openai::config::OpenAIConfig::default();
+    if let Some(openai_api_server) = config.authentication.openai_api_server.as_deref() {
+        openai_config = openai_config.with_api_base(openai_api_server);
     }
+    if let Some(openai_api_key) = config.authentication.openai_api_key.as_deref() {
+        openai_config = openai_config.with_api_key(openai_api_key);
+    }
+    let client = async_openai::Client::with_config(openai_config);
 
-    let model = LlamaModel::load_from_file(&backend, &config.model.path, &params)?;
+    let models: Vec<_> = client
+        .models()
+        .list()
+        .await?
+        .data
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
 
     let mut client = Client::builder(
         config
@@ -33,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
             .context("Expected authentication.discord_token to be filled in config")?,
         GatewayIntents::default(),
     )
-    .event_handler(handler::Handler::new(config, backend, model))
+    .event_handler(handler::Handler::new(config, client, models))
     .await
     .context("Error creating client")?;
 

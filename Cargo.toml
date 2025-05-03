@@ -1,13 +1,13 @@
 [package]
-description = "A Discord bot, written in Rust, that generates responses using any language model supported by `llm`."
+description = "A Discord bot, written in Rust, that generates responses through an OpenAI-compliant API."
 edition = "2021"
 license = "GPL-3.0-only"
 name = "llmcord"
-repository = "https://github.com/rustformers/llmcord"
 version = "0.2.0"
 
 [dependencies]
 anyhow = "1.0.66"
+async-openai = "0.28"
 flume = "0.10"
 serde = { version = "1.0.150", features = ["derive"] }
 serenity = { version = "0.11.5", default-features = false, features = [
@@ -20,12 +20,3 @@ serenity = { version = "0.11.5", default-features = false, features = [
 tokio = { version = "1.0", features = ["full"] }
 toml = "0.7.3"
 thiserror = "1.0"
-
-llama-cpp-2 = { git = "https://github.com/utilityai/llama-cpp-rs.git" }
-encoding_rs = "0.8.35"
-
-[features]
-default = ["cuda"]
-cuda = ["llama-cpp-2/cuda"]
-metal = ["llama-cpp-2/metal"]
-vulkan = ["llama-cpp-2/vulkan"]

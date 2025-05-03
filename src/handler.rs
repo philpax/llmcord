@@ -1,11 +1,13 @@
 use crate::{
     config::{self, Configuration},
     constant,
-    generation::{self, Token},
     util::{self, DiscordInteraction},
 };
 use anyhow::Context as AnyhowContext;
-use llama_cpp_2::{llama_backend::LlamaBackend, model::LlamaModel};
+use async_openai::types::{
+    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
+    ChatCompletionRequestUserMessage,
+};
 use serenity::{
     async_trait,
     builder::CreateComponents,
@@ -26,28 +28,26 @@ use serenity::{
 use std::collections::HashSet;
 
 pub struct Handler {
-    _model_thread: std::thread::JoinHandle<()>,
     config: Configuration,
-    request_tx: flume::Sender<generation::Request>,
+    client: async_openai::Client<async_openai::config::OpenAIConfig>,
+    models: Vec<String>,
     cancel_tx: flume::Sender<MessageId>,
+    cancel_rx: flume::Receiver<MessageId>,
 }
 impl Handler {
-    pub fn new(config: Configuration, backend: LlamaBackend, model: LlamaModel) -> Self {
-        let (request_tx, request_rx) = flume::unbounded::<generation::Request>();
+    pub fn new(
+        config: Configuration,
+        client: async_openai::Client<async_openai::config::OpenAIConfig>,
+        models: Vec<String>,
+    ) -> Self {
         let (cancel_tx, cancel_rx) = flume::unbounded::<MessageId>();
 
-        let _model_thread = generation::make_thread(
-            backend,
-            model,
-            config.model.context_token_length.try_into().unwrap(),
-            request_rx,
-            cancel_rx,
-        );
         Self {
-            _model_thread,
             config,
-            request_tx,
+            client,
+            models,
             cancel_tx,
+            cancel_rx,
         }
     }
 }
@@ -56,7 +56,7 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected; registering commands...", ready.user.name);
 
-        if let Err(err) = ready_handler(&ctx.http, &self.config).await {
+        if let Err(err) = ready_handler(&ctx.http, &self.config, &self.models).await {
             println!("Error while registering commands: `{err}`");
             std::process::exit(1);
         }
@@ -75,13 +75,7 @@ impl EventHandler for Handler {
                     util::run_and_report_error(
                         &cmd,
                         http,
-                        hallucinate(
-                            &cmd,
-                            http,
-                            self.request_tx.clone(),
-                            &self.config.inference,
-                            command,
-                        ),
+                        hallucinate(&cmd, http, &self.client, command, self.cancel_rx.clone()),
                     )
                     .await;
                 }
@@ -109,7 +103,11 @@ impl EventHandler for Handler {
     }
 }
 
-async fn ready_handler(http: &Http, config: &config::Configuration) -> anyhow::Result<()> {
+async fn ready_handler(
+    http: &Http,
+    config: &config::Configuration,
+    models: &[String],
+) -> anyhow::Result<()> {
     let registered_commands = Command::get_global_application_commands(http).await?;
     let registered_commands: HashSet<_> = registered_commands
         .iter()
@@ -134,6 +132,18 @@ async fn ready_handler(http: &Http, config: &config::Configuration) -> anyhow::R
         Command::create_global_application_command(http, |cmd| {
             cmd.name(name)
                 .description(command.description.as_str())
+                .create_option(|opt| {
+                    opt.name(constant::value::MODEL)
+                        .description("The model to use.")
+                        .kind(CommandOptionType::String)
+                        .required(true);
+
+                    for model in models {
+                        opt.add_string_choice(model, model);
+                    }
+
+                    opt
+                })
                 .create_option(|opt| {
                     opt.name(constant::value::PROMPT)
                         .description("The prompt.")
@@ -164,9 +174,9 @@ fn create_parameters(
 async fn hallucinate(
     cmd: &ApplicationCommandInteraction,
     http: &Http,
-    request_tx: flume::Sender<generation::Request>,
-    inference: &config::Inference,
+    client: &async_openai::Client<async_openai::config::OpenAIConfig>,
     command: &config::Command,
+    cancel_rx: flume::Receiver<MessageId>,
 ) -> anyhow::Result<()> {
     use constant::value as v;
     use util::{value_to_integer, value_to_string};
@@ -175,74 +185,68 @@ async fn hallucinate(
     let user_prompt = util::get_value(options, v::PROMPT)
         .and_then(value_to_string)
         .context("no prompt specified")?;
+    let user_prompt = user_prompt.replace("\\n", "\n");
 
-    let user_prompt = if inference.replace_newlines {
-        user_prompt.replace("\\n", "\n")
-    } else {
-        user_prompt
-    };
+    let seed = util::get_value(options, v::SEED)
+        .and_then(value_to_integer)
+        .map(|i| i as u32)
+        .unwrap_or(0);
+
+    let model = util::get_value(options, v::MODEL)
+        .and_then(value_to_string)
+        .context("no model specified")?;
 
     let mut outputter = Outputter::new(
         http,
         cmd,
+        model.clone(),
         user_prompt.clone(),
-        std::time::Duration::from_millis(inference.discord_message_update_interval_ms),
+        std::time::Duration::from_millis(constant::config::DISCORD_MESSAGE_UPDATE_INTERVAL_MS),
     )
     .await?;
 
     let message = cmd.get_interaction_message(http).await?;
     let message_id = message.id;
 
-    let seed = util::get_value(options, v::SEED)
-        .and_then(value_to_integer)
-        .map(|i| i as u32);
-
-    let (token_tx, token_rx) = flume::unbounded();
-    request_tx.send(generation::Request {
-        system_prompt: command.system_prompt.clone(),
-        user_prompt: outputter.user_prompt.clone(),
-        token_tx,
-        message_id,
-        seed,
-    })?;
-
-    let mut stream = token_rx.into_stream();
+    let mut stream = client
+        .chat()
+        .create_stream(
+            async_openai::types::CreateChatCompletionRequestArgs::default()
+                .model(model)
+                .seed(seed)
+                .messages([
+                    ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                        content: command.system_prompt.clone().into(),
+                        name: None,
+                    }),
+                    ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                        content: user_prompt.into(),
+                        name: None,
+                    }),
+                ])
+                .stream(true)
+                .build()?,
+        )
+        .await?;
 
     let mut errored = false;
-    while let Some(token) = stream.next().await {
-        match token {
-            Token::Token(t) => {
-                outputter.new_token(&t).await?;
+    while let Some(response) = stream.next().await {
+        if let Ok(cancel_message_id) = cancel_rx.try_recv() {
+            if cancel_message_id == message_id {
+                outputter.cancelled().await?;
+                errored = true;
+                break;
             }
-            Token::Error(err) => {
-                match err {
-                    generation::InferenceError::Cancelled => outputter.cancelled().await?,
-                    generation::InferenceError::Custom(m) => outputter.error(&m).await?,
-                    generation::InferenceError::LlamaContextLoadError(e) => {
-                        outputter.error(&e.to_string()).await?;
-                    }
-                    generation::InferenceError::ChatTemplateError(e) => {
-                        outputter.error(&e.to_string()).await?;
-                    }
-                    generation::InferenceError::ApplyChatTemplateError(e) => {
-                        outputter.error(&e.to_string()).await?;
-                    }
-                    generation::InferenceError::NewLlamaChatMessageError(e) => {
-                        outputter.error(&e.to_string()).await?;
-                    }
-                    generation::InferenceError::StringToTokenError(e) => {
-                        outputter.error(&e.to_string()).await?;
-                    }
-                    generation::InferenceError::DecodeError(e) => {
-                        outputter.error(&e.to_string()).await?;
-                    }
-                    generation::InferenceError::TokenToStringError(e) => {
-                        outputter.error(&e.to_string()).await?;
-                    }
-                    generation::InferenceError::BatchAddError(e) => {
-                        outputter.error(&e.to_string()).await?;
-                    }
-                };
+        }
+
+        match response {
+            Ok(response) => {
+                if let Some(content) = &response.choices[0].delta.content {
+                    outputter.new_token(content).await?;
+                }
+            }
+            Err(err) => {
+                outputter.error(&err.to_string()).await?;
                 errored = true;
                 break;
             }
@@ -259,6 +263,7 @@ struct Outputter<'a> {
     http: &'a Http,
 
     user_id: UserId,
+    model: String,
     messages: Vec<Message>,
     chunks: Vec<String>,
 
@@ -276,6 +281,7 @@ impl<'a> Outputter<'a> {
     async fn new(
         http: &'a Http,
         cmd: &ApplicationCommandInteraction,
+        model: String,
         user_prompt: String,
         last_update_duration: std::time::Duration,
     ) -> anyhow::Result<Outputter<'a>> {
@@ -295,6 +301,7 @@ impl<'a> Outputter<'a> {
             http,
 
             user_id: cmd.user.id,
+            model,
             messages: vec![starting_message],
             chunks: vec![],
 
@@ -326,7 +333,10 @@ impl<'a> Outputter<'a> {
         self.chunks = {
             let mut chunks: Vec<String> = vec![];
 
-            let markdown = format!("**{}**\n{}", self.user_prompt, self.message);
+            let markdown = format!(
+                "**{}** (*{}*)\n{}",
+                self.user_prompt, self.model, self.message
+            );
             for word in markdown.split(' ') {
                 if let Some(last) = chunks.last_mut() {
                     if last.len() > Self::MESSAGE_CHUNK_SIZE {
@@ -372,7 +382,7 @@ impl<'a> Outputter<'a> {
 
     async fn sync_messages_with_chunks(&mut self) -> anyhow::Result<()> {
         // Update the last message with its latest state, then insert the remaining chunks in one go
-        if let Some((msg, chunk)) = self.messages.iter_mut().zip(self.chunks.iter()).last() {
+        if let Some((msg, chunk)) = self.messages.iter_mut().zip(self.chunks.iter()).next_back() {
             msg.edit(self.http, |m| m.content(chunk)).await?;
         }
 

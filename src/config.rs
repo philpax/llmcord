@@ -5,8 +5,6 @@ use std::{collections::HashMap, path::PathBuf};
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Configuration {
     pub authentication: Authentication,
-    pub model: Model,
-    pub inference: Inference,
     pub commands: HashMap<String, Command>,
 }
 impl Default for Configuration {
@@ -14,17 +12,8 @@ impl Default for Configuration {
         Self {
             authentication: Authentication {
                 discord_token: None,
-            },
-            model: Model {
-                path: "your_model.gguf".into(),
-                context_token_length: 2048,
-                use_gpu: true,
-                gpu_layers: None,
-            },
-            inference: Inference {
-                discord_message_update_interval_ms: 250,
-                replace_newlines: true,
-                show_prompt_template: true,
+                openai_api_server: None,
+                openai_api_key: None,
             },
             commands: HashMap::from_iter([(
                 "ask".into(),
@@ -63,6 +52,8 @@ impl Configuration {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Authentication {
     pub discord_token: Option<String>,
+    pub openai_api_server: Option<String>,
+    pub openai_api_key: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
