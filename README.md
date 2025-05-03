@@ -2,15 +2,9 @@
 
 ![llmcord logo: a vaguely Discord Clyde-looking llama](docs/llmcord.png)
 
-A Discord bot, written in Rust, that generates responses using any language model supported by `llm`.
-
-Built on top of [llm](https://crates.io/crates/llm).
+A Discord bot, written in Rust, that generates responses using an OpenAI-compatible API.
 
 ## Setup
-
-### Model
-
-See [llm's README](https://github.com/rustformers/llm#getting-models).
 
 ### Bot
 
@@ -35,13 +29,5 @@ Note that you can define your own commands in the configuration, like so:
 [commands.makecaption]
 enabled = true
 description = "Attempts to make an image description for the given prompt."
-prompt = """Below is an instruction that describes a task. Write a response that appropriately completes the request.
-
-### Instruction:
-
-Create an evocative image description for "{{PROMPT}}".
-
-### Response:
-
-"""
+system_prompt = "Create an evocative image description."
 ```

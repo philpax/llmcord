@@ -948,7 +948,6 @@ dependencies = [
  "flume",
  "serde",
  "serenity",
- "thiserror 1.0.69",
  "tokio",
  "toml",
 ]
