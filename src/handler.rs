@@ -343,24 +343,7 @@ impl<'a> Outputter<'a> {
             return Ok(());
         }
 
-        // Split the token into lines and handle each line
-        let lines: Vec<&str> = token.split('\n').collect();
-        let mut processed_token = String::new();
-
-        for (i, line) in lines.iter().enumerate() {
-            if self.in_thinking_state {
-                // Add thinking prefix to each line
-                processed_token += "-# ";
-            }
-            processed_token += line;
-
-            // Add newline back if this isn't the last line
-            if i < lines.len() - 1 {
-                processed_token += "\n";
-            }
-        }
-
-        self.message += &processed_token;
+        self.message += token;
 
         // This could be much more efficient but that's a problem for later
         self.chunks = {
@@ -370,7 +353,20 @@ impl<'a> Outputter<'a> {
                 "**{}** (*{}*)\n{}",
                 self.user_prompt, self.model, self.message
             );
-            for word in markdown.split(' ') {
+
+            // Split into lines and handle thinking state
+            let mut processed_lines = Vec::new();
+            for line in markdown.split('\n') {
+                if self.in_thinking_state && !line.is_empty() {
+                    processed_lines.push(format!("-# {}", line));
+                } else {
+                    processed_lines.push(line.to_string());
+                }
+            }
+            let processed_markdown = processed_lines.join("\n");
+
+            // Split into chunks
+            for word in processed_markdown.split(' ') {
                 if let Some(last) = chunks.last_mut() {
                     if last.len() > Self::MESSAGE_CHUNK_SIZE {
                         chunks.push(word.to_string());
