@@ -271,7 +271,6 @@ struct Outputter<'a> {
     user_prompt: String,
 
     in_terminal_state: bool,
-    in_thinking_state: bool,
 
     last_update: std::time::Instant,
     last_update_duration: std::time::Duration,
@@ -310,7 +309,6 @@ impl<'a> Outputter<'a> {
             user_prompt,
 
             in_terminal_state: false,
-            in_thinking_state: false,
 
             last_update: std::time::Instant::now(),
             last_update_duration,
@@ -329,53 +327,52 @@ impl<'a> Outputter<'a> {
             }
         }
 
-        // Handle thinking state transitions
-        if token.contains("<think>") {
-            self.in_thinking_state = true;
-            return Ok(());
-        }
-        if token.contains("</think>") {
-            self.in_thinking_state = false;
-            // The next token should start with a newline
-            if !self.message.ends_with('\n') {
-                self.message += "\n";
-            }
-            return Ok(());
-        }
-
         self.message += token;
 
         // This could be much more efficient but that's a problem for later
         self.chunks = {
-            let mut chunks: Vec<String> = vec![];
+            let mut chunks: Vec<String> = vec!["".to_string()];
 
             let markdown = format!(
                 "**{}** (*{}*)\n{}",
                 self.user_prompt, self.model, self.message
             );
 
-            // Split into lines and handle thinking state
-            let mut processed_lines = Vec::new();
-            for line in markdown.split('\n') {
-                if self.in_thinking_state && !line.is_empty() {
-                    processed_lines.push(format!("-# {}", line));
-                } else {
-                    processed_lines.push(line.to_string());
-                }
-            }
-            let processed_markdown = processed_lines.join("\n");
-
             // Split into chunks
-            for word in processed_markdown.split(' ') {
-                if let Some(last) = chunks.last_mut() {
-                    if last.len() > Self::MESSAGE_CHUNK_SIZE {
-                        chunks.push(word.to_string());
+            let mut is_thinking = false;
+            for mut word in markdown.split(' ') {
+                if word.starts_with("<think>") {
+                    is_thinking = true;
+                    word = word.split_once("<think>").unwrap().1;
+                }
+                if word.starts_with("</think>") {
+                    is_thinking = false;
+                    word = word.split_once("</think>").unwrap().1;
+                }
+
+                let Some(last) = chunks.last_mut() else {
+                    continue;
+                };
+
+                if is_thinking && (last.is_empty() || last.ends_with('\n')) {
+                    last.push_str("#-");
+                }
+
+                if last.len() > Self::MESSAGE_CHUNK_SIZE {
+                    if is_thinking {
+                        chunks.push(format!("#- {word}"));
                     } else {
-                        last.push(' ');
-                        last.push_str(word);
+                        chunks.push(word.to_string());
                     }
                 } else {
-                    chunks.push(word.to_string());
+                    last.push(' ');
+                    for (idx, line) in word.split('\n').enumerate() {
+                        if is_thinking && idx > 0 {
+                            last.push_str("#-");
+                        }
+                        last.push_str(line);
+                        last.push('\n');
+                    }
                 }
             }
 
