@@ -375,6 +375,7 @@ impl<'a> Outputter<'a> {
                 .await?;
         }
 
+        self.in_terminal_state = true;
         self.sync_messages_with_chunks().await?;
 
         Ok(())
@@ -410,8 +411,10 @@ impl<'a> Outputter<'a> {
         }
 
         // Add the cancel button to the last message
-        if let Some(last) = self.messages.last_mut() {
-            add_cancel_button(self.http, first_id, last, self.user_id).await?;
+        if !self.in_terminal_state {
+            if let Some(last) = self.messages.last_mut() {
+                add_cancel_button(self.http, first_id, last, self.user_id).await?;
+            }
         }
 
         Ok(())
@@ -428,12 +431,11 @@ impl<'a> Outputter<'a> {
             .await?;
         }
 
+        self.in_terminal_state = true;
         let Some(last) = self.messages.last_mut() else {
             return Ok(());
         };
         reply_to_message_without_mentions(self.http, last, error_message).await?;
-
-        self.in_terminal_state = true;
 
         Ok(())
     }
