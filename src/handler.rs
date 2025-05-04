@@ -392,8 +392,11 @@ impl<'a> Outputter<'a> {
 
         // Remove the cancel button from all existing messages
         for msg in &mut self.messages {
-            msg.edit(self.http, |m| m.set_components(CreateComponents::default()))
-                .await?;
+            msg.edit(self.http, |m| {
+                m.set_components(CreateComponents::default())
+                    .allowed_mentions(|m| m.empty_roles().empty_users().empty_parse())
+            })
+            .await?;
         }
 
         // Create new messages for the remaining chunks
@@ -402,7 +405,7 @@ impl<'a> Outputter<'a> {
         };
         for chunk in self.chunks[self.messages.len()..].iter() {
             let last = self.messages.last_mut().unwrap();
-            let msg = last.reply(self.http, chunk).await?;
+            let msg = reply_to_message_without_mentions(self.http, last, chunk).await?;
             self.messages.push(msg);
         }
 
@@ -419,6 +422,7 @@ impl<'a> Outputter<'a> {
             let cut_content = format!("~~{}~~", msg.content);
             msg.edit(self.http, |m| {
                 m.set_components(CreateComponents::default())
+                    .allowed_mentions(|m| m.empty_roles().empty_users().empty_parse())
                     .content(cut_content)
             })
             .await?;
@@ -427,7 +431,7 @@ impl<'a> Outputter<'a> {
         let Some(last) = self.messages.last_mut() else {
             return Ok(());
         };
-        last.reply(self.http, error_message).await?;
+        reply_to_message_without_mentions(self.http, last, error_message).await?;
 
         self.in_terminal_state = true;
 
@@ -452,6 +456,21 @@ async fn add_cancel_button(
                 })
             });
             r.set_components(components)
+        })
+        .await?)
+}
+
+async fn reply_to_message_without_mentions(
+    http: &Http,
+    msg: &Message,
+    content: &str,
+) -> anyhow::Result<Message> {
+    Ok(msg
+        .channel_id
+        .send_message(http, |m| {
+            m.reference_message(msg)
+                .content(content)
+                .allowed_mentions(|m| m.empty_roles().empty_users().empty_parse())
         })
         .await?)
 }
