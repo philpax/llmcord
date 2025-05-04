@@ -271,6 +271,7 @@ struct Outputter<'a> {
     user_prompt: String,
 
     in_terminal_state: bool,
+    in_thinking_state: bool,
 
     last_update: std::time::Instant,
     last_update_duration: std::time::Duration,
@@ -309,6 +310,7 @@ impl<'a> Outputter<'a> {
             user_prompt,
 
             in_terminal_state: false,
+            in_thinking_state: false,
 
             last_update: std::time::Instant::now(),
             last_update_duration,
@@ -327,7 +329,38 @@ impl<'a> Outputter<'a> {
             }
         }
 
-        self.message += token;
+        // Handle thinking state transitions
+        if token.contains("<think>") {
+            self.in_thinking_state = true;
+            return Ok(());
+        }
+        if token.contains("</think>") {
+            self.in_thinking_state = false;
+            // The next token should start with a newline
+            if !self.message.ends_with('\n') {
+                self.message += "\n";
+            }
+            return Ok(());
+        }
+
+        // Split the token into lines and handle each line
+        let lines: Vec<&str> = token.split('\n').collect();
+        let mut processed_token = String::new();
+
+        for (i, line) in lines.iter().enumerate() {
+            if self.in_thinking_state {
+                // Add thinking prefix to each line
+                processed_token += "-# ";
+            }
+            processed_token += line;
+
+            // Add newline back if this isn't the last line
+            if i < lines.len() - 1 {
+                processed_token += "\n";
+            }
+        }
+
+        self.message += &processed_token;
 
         // This could be much more efficient but that's a problem for later
         self.chunks = {
