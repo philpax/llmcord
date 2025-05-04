@@ -328,56 +328,12 @@ impl<'a> Outputter<'a> {
         }
 
         self.message += token;
-
-        // This could be much more efficient but that's a problem for later
-        self.chunks = {
-            let mut chunks: Vec<String> = vec!["".to_string()];
-
-            let markdown = format!(
-                "**{}** (*{}*)\n{}",
-                self.user_prompt, self.model, self.message
-            );
-
-            // Split into chunks
-            let mut is_thinking = false;
-            for mut word in markdown.split(' ') {
-                if word.starts_with("<think>") {
-                    is_thinking = true;
-                    word = word.split_once("<think>").unwrap().1;
-                }
-                if word.starts_with("</think>") {
-                    is_thinking = false;
-                    word = word.split_once("</think>").unwrap().1;
-                }
-
-                let Some(last) = chunks.last_mut() else {
-                    continue;
-                };
-
-                if is_thinking && (last.is_empty() || last.ends_with('\n')) {
-                    last.push_str("#-");
-                }
-
-                if last.len() > Self::MESSAGE_CHUNK_SIZE {
-                    if is_thinking {
-                        chunks.push(format!("#- {word}"));
-                    } else {
-                        chunks.push(word.to_string());
-                    }
-                } else {
-                    last.push(' ');
-                    for (idx, line) in word.split('\n').enumerate() {
-                        if is_thinking && idx > 0 {
-                            last.push_str("#-");
-                        }
-                        last.push_str(line);
-                        last.push('\n');
-                    }
-                }
-            }
-
-            chunks
-        };
+        self.chunks = chunk_message(
+            &self.message,
+            &self.user_prompt,
+            &self.model,
+            Self::MESSAGE_CHUNK_SIZE,
+        );
 
         if self.last_update.elapsed() > self.last_update_duration {
             self.sync_messages_with_chunks().await?;
@@ -501,4 +457,54 @@ async fn reply_to_message_without_mentions(
                 .allowed_mentions(|m| m.empty_roles().empty_users().empty_parse())
         })
         .await?)
+}
+
+fn chunk_message(message: &str, user_prompt: &str, model: &str, chunk_size: usize) -> Vec<String> {
+    let mut chunks: Vec<String> = vec!["".to_string()];
+
+    let markdown = format!("**{user_prompt}** (*{model}*)\n{message}");
+    for word in markdown.split(' ') {
+        let Some(last) = chunks.last_mut() else {
+            continue;
+        };
+
+        if last.len() > chunk_size {
+            chunks.push(word.to_string());
+        } else {
+            if !last.is_empty() {
+                last.push(' ');
+            }
+            last.push_str(word);
+        }
+    }
+
+    chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chunk_message() {
+        let message = r#"<think>Okay, the user asked, "tell me about the end of the world." First, I need to figure out what they're really looking for. The end of the world is a broad topic, so I should consider different angles. They might be interested in apocalyptic scenarios, religious beliefs, or maybe even the scientific theories about the universe's fate.
+
+I should start by acknowledging that the end of the world is a common theme in various cultures and religions. Mentioning different perspectives would be good. For example, in Christianity, there's the concept of the apocalypse, while in Hinduism, there's the cycle of destruction and rebirth. Also, Norse mythology has Ragnarok. Including these examples shows the diversity of beliefs.</think>
+
+So this is how the world ends."#;
+        let user_prompt = "tell me about the end of the world";
+        let model = "gpu:qwen3-30b-a3b";
+        let chunk_size = 100;
+
+        let chunks = chunk_message(message, user_prompt, model, chunk_size);
+        assert_eq!(chunks, [
+            "**tell me about the end of the world** (*gpu:qwen3-30b-a3b*)\n-# Okay, the user asked, \"tell me about the", "end of the world.\" First, I need to figure out what they're really looking for. The end of the world is",
+            "-# a broad topic, so I should consider different angles. They might be interested in apocalyptic scenarios,",
+            "-# religious beliefs, or maybe even the scientific theories about the universe's fate.\n\n-# I should start by",
+            "-# acknowledging that the end of the world is a common theme in various cultures and religions. Mentioning",
+            "-# different perspectives would be good. For example, in Christianity, there's the concept of the apocalypse,",
+            "-# while in Hinduism, there's the cycle of destruction and rebirth. Also, Norse mythology has Ragnarok. Including",
+            "-# these examples shows the diversity of beliefs.\n\nSo this is how the world ends."
+        ]);
+    }
 }
