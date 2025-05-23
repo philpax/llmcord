@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(default)]
 pub struct Configuration {
     pub authentication: Authentication,
     pub commands: HashMap<String, Command>,
@@ -33,10 +34,9 @@ impl Configuration {
         let config = if let Ok(file) = std::fs::read_to_string(Self::FILENAME) {
             toml::from_str(&file).context("failed to load config")?
         } else {
-            let config = Self::default();
-            config.save()?;
-            config
+            Self::default()
         };
+        config.save()?;
 
         Ok(config)
     }
