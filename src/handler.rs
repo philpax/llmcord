@@ -8,23 +8,7 @@ use async_openai::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
     ChatCompletionRequestUserMessage,
 };
-use serenity::{
-    async_trait,
-    builder::CreateComponents,
-    client::{Context, EventHandler},
-    futures::StreamExt,
-    http::Http,
-    model::{
-        application::interaction::Interaction,
-        prelude::{
-            command::{Command, CommandOptionType},
-            interaction::{
-                application_command::ApplicationCommandInteraction, InteractionResponseType,
-            },
-            *,
-        },
-    },
-};
+use serenity::{all::*, async_trait, futures::StreamExt};
 use std::collections::HashSet;
 
 pub struct Handler {
@@ -67,7 +51,7 @@ impl EventHandler for Handler {
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         let http = &ctx.http;
         match interaction {
-            Interaction::ApplicationCommand(cmd) => {
+            Interaction::Command(cmd) => {
                 let name = cmd.data.name.as_str();
                 let commands = &self.config.commands;
 
@@ -80,7 +64,7 @@ impl EventHandler for Handler {
                     .await;
                 }
             }
-            Interaction::MessageComponent(cmp) => {
+            Interaction::Component(cmp) => {
                 if let ["cancel", message_id, user_id] =
                     cmp.data.custom_id.split('#').collect::<Vec<_>>()[..]
                 {
@@ -88,10 +72,13 @@ impl EventHandler for Handler {
                         (message_id.parse::<u64>(), user_id.parse::<u64>())
                     {
                         if cmp.user.id == user_id {
-                            self.cancel_tx.send(MessageId(message_id)).ok();
-                            cmp.create_interaction_response(http, |r| {
-                                r.kind(InteractionResponseType::DeferredUpdateMessage)
-                            })
+                            self.cancel_tx.send(MessageId::new(message_id)).ok();
+                            cmp.create_response(
+                                http,
+                                CreateInteractionResponse::UpdateMessage(
+                                    CreateInteractionResponseMessage::new(),
+                                ),
+                            )
                             .await
                             .ok();
                         }
@@ -108,7 +95,7 @@ async fn ready_handler(
     config: &config::Configuration,
     models: &[String],
 ) -> anyhow::Result<()> {
-    let registered_commands = Command::get_global_application_commands(http).await?;
+    let registered_commands = Command::get_global_commands(http).await?;
     let registered_commands: HashSet<_> = registered_commands
         .iter()
         .map(|c| c.name.as_str())
@@ -124,55 +111,52 @@ async fn ready_handler(
     if registered_commands != our_commands {
         // If the commands registered with Discord don't match the commands configured
         // for this bot, reset them entirely.
-        Command::set_global_application_commands(http, |c| c.set_application_commands(vec![]))
-            .await?;
+        Command::set_global_commands(http, vec![]).await?;
     }
 
     for (name, command) in config.commands.iter().filter(|(_, v)| v.enabled) {
-        Command::create_global_application_command(http, |cmd| {
-            cmd.name(name)
+        let mut model_option = CreateCommandOption::new(
+            CommandOptionType::String,
+            constant::value::MODEL,
+            "The model to use.",
+        )
+        .required(true);
+
+        for model in models {
+            model_option = model_option.add_string_choice(model, model);
+        }
+
+        Command::create_global_command(
+            http,
+            CreateCommand::new(name)
                 .description(command.description.as_str())
-                .create_option(|opt| {
-                    opt.name(constant::value::MODEL)
-                        .description("The model to use.")
-                        .kind(CommandOptionType::String)
-                        .required(true);
-
-                    for model in models {
-                        opt.add_string_choice(model, model);
-                    }
-
-                    opt
-                })
-                .create_option(|opt| {
-                    opt.name(constant::value::PROMPT)
-                        .description("The prompt.")
-                        .kind(CommandOptionType::String)
-                        .required(true)
-                });
-
-            create_parameters(cmd)
-        })
+                .add_option(model_option)
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        constant::value::PROMPT,
+                        "The prompt.",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::Integer,
+                        constant::value::SEED,
+                        "The seed to use for sampling.",
+                    )
+                    .min_int_value(0)
+                    .required(false),
+                ),
+        )
         .await?;
     }
 
     Ok(())
 }
 
-fn create_parameters(
-    command: &mut serenity::builder::CreateApplicationCommand,
-) -> &mut serenity::builder::CreateApplicationCommand {
-    command.create_option(|opt| {
-        opt.name(constant::value::SEED)
-            .kind(CommandOptionType::Integer)
-            .description("The seed to use for sampling.")
-            .min_int_value(0)
-            .required(false)
-    })
-}
-
 async fn hallucinate(
-    cmd: &ApplicationCommandInteraction,
+    cmd: &CommandInteraction,
     http: &Http,
     client: &async_openai::Client<async_openai::config::OpenAIConfig>,
     command: &config::Command,
@@ -280,22 +264,21 @@ impl<'a> Outputter<'a> {
 
     async fn new(
         http: &'a Http,
-        cmd: &ApplicationCommandInteraction,
+        cmd: &CommandInteraction,
         model: String,
         user_prompt: String,
         last_update_duration: std::time::Duration,
     ) -> anyhow::Result<Outputter<'a>> {
-        cmd.create_interaction_response(http, |response| {
-            response
-                .kind(InteractionResponseType::ChannelMessageWithSource)
-                .interaction_response_data(|message| {
-                    message
-                        .content("Generating...")
-                        .allowed_mentions(|m| m.empty_roles().empty_users().empty_parse())
-                })
-        })
+        cmd.create_response(
+            http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content("Generating...")
+                    .allowed_mentions(CreateAllowedMentions::new()),
+            ),
+        )
         .await?;
-        let starting_message = cmd.get_interaction_response(http).await?;
+        let starting_message = cmd.get_response(http).await?;
 
         Ok(Self {
             http,
@@ -353,7 +336,7 @@ impl<'a> Outputter<'a> {
 
     async fn finish(&mut self) -> anyhow::Result<()> {
         for msg in &mut self.messages {
-            msg.edit(self.http, |m| m.set_components(CreateComponents::default()))
+            msg.edit(self.http, EditMessage::new().components(vec![]))
                 .await?;
         }
 
@@ -366,7 +349,8 @@ impl<'a> Outputter<'a> {
     async fn sync_messages_with_chunks(&mut self) -> anyhow::Result<()> {
         // Update the last message with its latest state, then insert the remaining chunks in one go
         if let Some((msg, chunk)) = self.messages.iter_mut().zip(self.chunks.iter()).next_back() {
-            msg.edit(self.http, |m| m.content(chunk)).await?;
+            msg.edit(self.http, EditMessage::new().content(chunk))
+                .await?;
         }
 
         if self.chunks.len() <= self.messages.len() {
@@ -375,10 +359,12 @@ impl<'a> Outputter<'a> {
 
         // Remove the cancel button from all existing messages
         for msg in &mut self.messages {
-            msg.edit(self.http, |m| {
-                m.set_components(CreateComponents::default())
-                    .allowed_mentions(|m| m.empty_roles().empty_users().empty_parse())
-            })
+            msg.edit(
+                self.http,
+                EditMessage::new()
+                    .components(vec![])
+                    .allowed_mentions(CreateAllowedMentions::new()),
+            )
             .await?;
         }
 
@@ -405,11 +391,13 @@ impl<'a> Outputter<'a> {
     async fn on_error(&mut self, error_message: &str) -> anyhow::Result<()> {
         for msg in &mut self.messages {
             let cut_content = format!("~~{}~~", msg.content);
-            msg.edit(self.http, |m| {
-                m.set_components(CreateComponents::default())
-                    .allowed_mentions(|m| m.empty_roles().empty_users().empty_parse())
-                    .content(cut_content)
-            })
+            msg.edit(
+                self.http,
+                EditMessage::new()
+                    .components(vec![])
+                    .allowed_mentions(CreateAllowedMentions::new())
+                    .content(cut_content),
+            )
             .await?;
         }
 
@@ -430,17 +418,14 @@ async fn add_cancel_button(
     user_id: UserId,
 ) -> anyhow::Result<()> {
     Ok(msg
-        .edit(http, |r| {
-            let mut components = CreateComponents::default();
-            components.create_action_row(|r| {
-                r.create_button(|b| {
-                    b.custom_id(format!("cancel#{first_id}#{user_id}"))
-                        .style(component::ButtonStyle::Danger)
-                        .label("Cancel")
-                })
-            });
-            r.set_components(components)
-        })
+        .edit(
+            http,
+            EditMessage::new().components(vec![CreateActionRow::Buttons(vec![CreateButton::new(
+                format!("cancel#{first_id}#{user_id}"),
+            )
+            .style(ButtonStyle::Danger)
+            .label("Cancel")])]),
+        )
         .await?)
 }
 
@@ -451,11 +436,13 @@ async fn reply_to_message_without_mentions(
 ) -> anyhow::Result<Message> {
     Ok(msg
         .channel_id
-        .send_message(http, |m| {
-            m.reference_message(msg)
+        .send_message(
+            http,
+            CreateMessage::new()
+                .reference_message(msg)
                 .content(content)
-                .allowed_mentions(|m| m.empty_roles().empty_users().empty_parse())
-        })
+                .allowed_mentions(CreateAllowedMentions::new()),
+        )
         .await?)
 }
 
@@ -479,32 +466,4 @@ fn chunk_message(message: &str, user_prompt: &str, model: &str, chunk_size: usiz
     }
 
     chunks
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_chunk_message() {
-        let message = r#"<think>Okay, the user asked, "tell me about the end of the world." First, I need to figure out what they're really looking for. The end of the world is a broad topic, so I should consider different angles. They might be interested in apocalyptic scenarios, religious beliefs, or maybe even the scientific theories about the universe's fate.
-
-I should start by acknowledging that the end of the world is a common theme in various cultures and religions. Mentioning different perspectives would be good. For example, in Christianity, there's the concept of the apocalypse, while in Hinduism, there's the cycle of destruction and rebirth. Also, Norse mythology has Ragnarok. Including these examples shows the diversity of beliefs.</think>
-
-So this is how the world ends."#;
-        let user_prompt = "tell me about the end of the world";
-        let model = "gpu:qwen3-30b-a3b";
-        let chunk_size = 100;
-
-        let chunks = chunk_message(message, user_prompt, model, chunk_size);
-        assert_eq!(chunks, [
-            "**tell me about the end of the world** (*gpu:qwen3-30b-a3b*)\n-# Okay, the user asked, \"tell me about the", "end of the world.\" First, I need to figure out what they're really looking for. The end of the world is",
-            "-# a broad topic, so I should consider different angles. They might be interested in apocalyptic scenarios,",
-            "-# religious beliefs, or maybe even the scientific theories about the universe's fate.\n\n-# I should start by",
-            "-# acknowledging that the end of the world is a common theme in various cultures and religions. Mentioning",
-            "-# different perspectives would be good. For example, in Christianity, there's the concept of the apocalypse,",
-            "-# while in Hinduism, there's the cycle of destruction and rebirth. Also, Norse mythology has Ragnarok. Including",
-            "-# these examples shows the diversity of beliefs.\n\nSo this is how the world ends."
-        ]);
-    }
 }

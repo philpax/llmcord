@@ -1,31 +1,11 @@
-use serenity::{
-    async_trait,
-    http::Http,
-    model::{
-        prelude::{
-            interaction::{
-                application_command::{
-                    ApplicationCommandInteraction, CommandDataOption, CommandDataOptionValue,
-                },
-                message_component::MessageComponentInteraction,
-                modal::ModalSubmitInteraction,
-                InteractionResponseType,
-            },
-            ChannelId, GuildId, Message,
-        },
-        user::User,
-    },
-};
+use serenity::{all::*, async_trait};
 use std::future::Future;
 
 pub fn get_value<'a>(
     options: &'a [CommandDataOption],
     name: &'a str,
 ) -> Option<&'a CommandDataOptionValue> {
-    options
-        .iter()
-        .find(|v| v.name == name)
-        .and_then(|v| v.resolved.as_ref())
+    options.iter().find(|v| v.name == name).map(|v| &v.value)
 }
 
 pub fn value_to_string(v: &CommandDataOptionValue) -> Option<String> {
@@ -61,27 +41,28 @@ macro_rules! implement_interaction {
         impl DiscordInteraction for $name {
             async fn create(&self, http: &Http, msg: &str) -> anyhow::Result<()> {
                 Ok(self
-                    .create_interaction_response(http, |response| {
-                        response
-                            .kind(InteractionResponseType::ChannelMessageWithSource)
-                            .interaction_response_data(|message| message.content(msg))
-                    })
+                    .create_response(
+                        http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new().content(msg),
+                        ),
+                    )
                     .await?)
             }
             async fn get_interaction_message(&self, http: &Http) -> anyhow::Result<Message> {
-                Ok(self.get_interaction_response(http).await?)
+                Ok(self.get_response(http).await?)
             }
             async fn edit(&self, http: &Http, message: &str) -> anyhow::Result<()> {
                 Ok(self
                     .get_interaction_message(http)
                     .await?
-                    .edit(http, |m| m.content(message))
+                    .edit(http, EditMessage::new().content(message))
                     .await?)
             }
             async fn create_or_edit(&self, http: &Http, message: &str) -> anyhow::Result<()> {
                 Ok(
                     if let Ok(mut msg) = self.get_interaction_message(http).await {
-                        msg.edit(http, |m| m.content(message)).await?
+                        msg.edit(http, EditMessage::new().content(message)).await?
                     } else {
                         self.create(http, message).await?
                     },
@@ -102,25 +83,25 @@ macro_rules! implement_interaction {
     };
 }
 macro_rules! interaction_message {
-    (ApplicationCommandInteraction) => {
+    (CommandInteraction) => {
         fn message(&self) -> Option<&Message> {
             None
         }
     };
-    (MessageComponentInteraction) => {
+    (ComponentInteraction) => {
         fn message(&self) -> Option<&Message> {
-            Some(&self.message)
+            Some(&*self.message)
         }
     };
-    (ModalSubmitInteraction) => {
+    (ModalInteraction) => {
         fn message(&self) -> Option<&Message> {
-            self.message.as_ref()
+            self.message.as_ref().map(|m| &**m)
         }
     };
 }
-implement_interaction!(ApplicationCommandInteraction);
-implement_interaction!(MessageComponentInteraction);
-implement_interaction!(ModalSubmitInteraction);
+implement_interaction!(CommandInteraction);
+implement_interaction!(ComponentInteraction);
+implement_interaction!(ModalInteraction);
 
 /// Runs the [body] and edits the interaction response if an error occurs.
 pub async fn run_and_report_error(
