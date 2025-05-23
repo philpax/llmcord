@@ -7,6 +7,7 @@ use std::{collections::HashMap, path::PathBuf};
 pub struct Configuration {
     pub authentication: Authentication,
     pub commands: HashMap<String, Command>,
+    pub discord: Discord,
 }
 impl Default for Configuration {
     fn default() -> Self {
@@ -24,6 +25,7 @@ impl Default for Configuration {
                     system_prompt: "You are a helpful assistant.".into(),
                 },
             )]),
+            discord: Discord::default(),
         }
     }
 }
@@ -69,14 +71,20 @@ pub struct Model {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Inference {
+pub struct Discord {
     /// Low values will result in you getting throttled by Discord
-    pub discord_message_update_interval_ms: u64,
+    pub message_update_interval_ms: u64,
     /// Whether or not to replace '\n' with newlines
     pub replace_newlines: bool,
-    /// Whether or not to show the entire prompt template, or just
-    /// what the user specified
-    pub show_prompt_template: bool,
+}
+
+impl Default for Discord {
+    fn default() -> Self {
+        Self {
+            message_update_interval_ms: 1000,
+            replace_newlines: true,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

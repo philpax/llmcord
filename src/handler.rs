@@ -59,7 +59,14 @@ impl EventHandler for Handler {
                     util::run_and_report_error(
                         &cmd,
                         http,
-                        hallucinate(&cmd, http, &self.client, command, self.cancel_rx.clone()),
+                        hallucinate(
+                            &cmd,
+                            http,
+                            &self.client,
+                            command,
+                            &self.config,
+                            self.cancel_rx.clone(),
+                        ),
                     )
                     .await;
                 }
@@ -160,6 +167,7 @@ async fn hallucinate(
     http: &Http,
     client: &async_openai::Client<async_openai::config::OpenAIConfig>,
     command: &config::Command,
+    config: &config::Configuration,
     cancel_rx: flume::Receiver<MessageId>,
 ) -> anyhow::Result<()> {
     use constant::value as v;
@@ -169,7 +177,12 @@ async fn hallucinate(
     let user_prompt = util::get_value(options, v::PROMPT)
         .and_then(value_to_string)
         .context("no prompt specified")?;
-    let user_prompt = user_prompt.replace("\\n", "\n");
+
+    let user_prompt = if config.discord.replace_newlines {
+        user_prompt.replace("\\n", "\n")
+    } else {
+        user_prompt
+    };
 
     let seed = util::get_value(options, v::SEED)
         .and_then(value_to_integer)
@@ -185,7 +198,7 @@ async fn hallucinate(
         cmd,
         model.clone(),
         user_prompt.clone(),
-        std::time::Duration::from_millis(constant::config::DISCORD_MESSAGE_UPDATE_INTERVAL_MS),
+        std::time::Duration::from_millis(config.discord.message_update_interval_ms),
     )
     .await?;
 
