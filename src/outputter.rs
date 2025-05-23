@@ -147,10 +147,9 @@ impl<'a> Outputter<'a> {
         }
 
         self.in_terminal_state = true;
-        let Some(last) = self.messages.last_mut() else {
-            return Ok(());
-        };
-        reply_to_message_without_mentions(self.http, last, error_message).await?;
+        if let Some(last) = self.messages.last_mut() {
+            reply_to_message_without_mentions(self.http, last, error_message).await?;
+        }
 
         Ok(())
     }
