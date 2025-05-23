@@ -13,12 +13,7 @@ use serenity::{
     futures::StreamExt,
 };
 
-use crate::{
-    ai::Ai,
-    config, constant,
-    outputter::Outputter,
-    util::{self, RespondableInteraction},
-};
+use crate::{ai::Ai, config, constant, outputter::Outputter, util};
 
 use super::CommandHandler;
 
@@ -124,11 +119,10 @@ impl CommandHandler for Handler {
             http,
             cmd,
             std::time::Duration::from_millis(self.discord_config.message_update_interval_ms),
+            "Generating...",
         )
         .await?;
-
-        let message = cmd.get_interaction_message(http).await?;
-        let message_id = message.id;
+        let starting_message_id = outputter.starting_message_id();
 
         let mut stream = self
             .ai
@@ -157,7 +151,7 @@ impl CommandHandler for Handler {
         let mut message = String::new();
         while let Some(response) = stream.next().await {
             if let Ok(cancel_message_id) = self.cancel_rx.try_recv() {
-                if cancel_message_id == message_id {
+                if cancel_message_id == starting_message_id {
                     outputter.cancelled().await?;
                     errored = true;
                     break;

@@ -1,6 +1,6 @@
 use serenity::all::{
     CommandInteraction, CreateAllowedMentions, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, EditMessage, Http, Message, UserId,
+    CreateInteractionResponseMessage, CreateMessage, EditMessage, Http, Message, MessageId, UserId,
 };
 
 pub struct Outputter<'a> {
@@ -22,12 +22,13 @@ impl<'a> Outputter<'a> {
         http: &'a Http,
         cmd: &CommandInteraction,
         last_update_duration: std::time::Duration,
+        initial_message: &str,
     ) -> anyhow::Result<Outputter<'a>> {
         cmd.create_response(
             http,
             CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
-                    .content("Generating...")
+                    .content(initial_message)
                     .allowed_mentions(CreateAllowedMentions::new()),
             ),
         )
@@ -46,6 +47,10 @@ impl<'a> Outputter<'a> {
             last_update: std::time::Instant::now(),
             last_update_duration,
         })
+    }
+
+    pub fn starting_message_id(&self) -> MessageId {
+        self.messages.first().unwrap().id
     }
 
     pub async fn update(&mut self, message: &str) -> anyhow::Result<()> {
