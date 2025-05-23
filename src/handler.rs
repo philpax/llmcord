@@ -196,8 +196,6 @@ async fn hallucinate(
     let mut outputter = Outputter::new(
         http,
         cmd,
-        model.clone(),
-        user_prompt.clone(),
         std::time::Duration::from_millis(config.discord.message_update_interval_ms),
     )
     .await?;
@@ -209,7 +207,7 @@ async fn hallucinate(
         .chat()
         .create_stream(
             async_openai::types::CreateChatCompletionRequestArgs::default()
-                .model(model)
+                .model(model.clone())
                 .seed(seed)
                 .messages([
                     ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
@@ -217,7 +215,7 @@ async fn hallucinate(
                         name: None,
                     }),
                     ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                        content: user_prompt.into(),
+                        content: user_prompt.clone().into(),
                         name: None,
                     }),
                 ])
@@ -227,6 +225,7 @@ async fn hallucinate(
         .await?;
 
     let mut errored = false;
+    let mut message = String::new();
     while let Some(response) = stream.next().await {
         if let Ok(cancel_message_id) = cancel_rx.try_recv() {
             if cancel_message_id == message_id {
@@ -239,7 +238,10 @@ async fn hallucinate(
         match response {
             Ok(response) => {
                 if let Some(content) = &response.choices[0].delta.content {
-                    outputter.new_token(content).await?;
+                    message += content;
+                    outputter
+                        .update(&format!("**{user_prompt}** (*{model}*)\n{message}"))
+                        .await?;
                 }
             }
             Err(err) => {
@@ -260,12 +262,8 @@ struct Outputter<'a> {
     http: &'a Http,
 
     user_id: UserId,
-    model: String,
     messages: Vec<Message>,
     chunks: Vec<String>,
-
-    message: String,
-    user_prompt: String,
 
     in_terminal_state: bool,
 
@@ -278,8 +276,6 @@ impl<'a> Outputter<'a> {
     async fn new(
         http: &'a Http,
         cmd: &CommandInteraction,
-        model: String,
-        user_prompt: String,
         last_update_duration: std::time::Duration,
     ) -> anyhow::Result<Outputter<'a>> {
         cmd.create_response(
@@ -297,12 +293,8 @@ impl<'a> Outputter<'a> {
             http,
 
             user_id: cmd.user.id,
-            model,
             messages: vec![starting_message],
             chunks: vec![],
-
-            message: String::new(),
-            user_prompt,
 
             in_terminal_state: false,
 
@@ -311,25 +303,12 @@ impl<'a> Outputter<'a> {
         })
     }
 
-    async fn new_token(&mut self, token: &str) -> anyhow::Result<()> {
+    async fn update(&mut self, message: &str) -> anyhow::Result<()> {
         if self.in_terminal_state {
             return Ok(());
         }
 
-        if self.message.is_empty() {
-            // Add the cancellation button when we receive the first token
-            if let Some(first) = self.messages.first_mut() {
-                add_cancel_button(self.http, first.id, first, self.user_id).await?;
-            }
-        }
-
-        self.message += token;
-        self.chunks = chunk_message(
-            &self.message,
-            &self.user_prompt,
-            &self.model,
-            Self::MESSAGE_CHUNK_SIZE,
-        );
+        self.chunks = chunk_message(message, Self::MESSAGE_CHUNK_SIZE);
 
         if self.last_update.elapsed() > self.last_update_duration {
             self.sync_messages_with_chunks().await?;
@@ -360,16 +339,18 @@ impl<'a> Outputter<'a> {
     }
 
     async fn sync_messages_with_chunks(&mut self) -> anyhow::Result<()> {
-        // Update the last message with its latest state, then insert the remaining chunks in one go
-        if let Some((msg, chunk)) = self.messages.iter_mut().zip(self.chunks.iter()).next_back() {
+        // Update existing messages to match chunks
+        for (msg, chunk) in self.messages.iter_mut().zip(self.chunks.iter()) {
             msg.edit(self.http, EditMessage::new().content(chunk))
                 .await?;
         }
 
-        if self.chunks.len() <= self.messages.len() {
-            return Ok(());
+        if self.chunks.len() < self.messages.len() {
+            // Delete excess messages
+            for msg in self.messages.drain(self.chunks.len()..) {
+                msg.delete(self.http).await?;
         }
-
+        } else if self.chunks.len() > self.messages.len() {
         // Remove the cancel button from all existing messages
         for msg in &mut self.messages {
             msg.edit(
@@ -382,19 +363,24 @@ impl<'a> Outputter<'a> {
         }
 
         // Create new messages for the remaining chunks
+            for chunk in self.chunks[self.messages.len()..].iter() {
+                let last = self.messages.last_mut().unwrap();
+                let msg = reply_to_message_without_mentions(self.http, last, chunk).await?;
+                self.messages.push(msg);
+            }
+        }
+
         let Some(first_id) = self.messages.first().map(|m| m.id) else {
             return Ok(());
         };
-        for chunk in self.chunks[self.messages.len()..].iter() {
-            let last = self.messages.last_mut().unwrap();
-            let msg = reply_to_message_without_mentions(self.http, last, chunk).await?;
-            self.messages.push(msg);
-        }
 
         // Add the cancel button to the last message
         if !self.in_terminal_state {
             if let Some(last) = self.messages.last_mut() {
+                // TODO: if-let chain, 1.88
+                if last.components.is_empty() {
                 add_cancel_button(self.http, first_id, last, self.user_id).await?;
+                }
             }
         }
 
@@ -433,11 +419,11 @@ async fn add_cancel_button(
     Ok(msg
         .edit(
             http,
-            EditMessage::new().components(vec![CreateActionRow::Buttons(vec![CreateButton::new(
-                format!("cancel#{first_id}#{user_id}"),
-            )
+            EditMessage::new().components(vec![CreateActionRow::Buttons(vec![
+                CreateButton::new(format!("cancel#{first_id}#{user_id}"))
             .style(ButtonStyle::Danger)
-            .label("Cancel")])]),
+                    .label("Cancel"),
+            ])]),
         )
         .await?)
 }
@@ -459,11 +445,10 @@ async fn reply_to_message_without_mentions(
         .await?)
 }
 
-fn chunk_message(message: &str, user_prompt: &str, model: &str, chunk_size: usize) -> Vec<String> {
+fn chunk_message(message: &str, chunk_size: usize) -> Vec<String> {
     let mut chunks: Vec<String> = vec!["".to_string()];
 
-    let markdown = format!("**{user_prompt}** (*{model}*)\n{message}");
-    for word in markdown.split(' ') {
+    for word in message.split(' ') {
         let Some(last) = chunks.last_mut() else {
             continue;
         };
