@@ -8,21 +8,21 @@ use crate::{config, constant};
 use super::CommandHandler;
 
 pub struct Handler {
-    _cancel_rx: flume::Receiver<MessageId>,
     _discord_config: config::Discord,
+    _cancel_rx: flume::Receiver<MessageId>,
 }
 impl Handler {
-    pub fn new(config: &config::Configuration, cancel_rx: flume::Receiver<MessageId>) -> Self {
+    pub fn new(discord_config: config::Discord, cancel_rx: flume::Receiver<MessageId>) -> Self {
         Self {
+            _discord_config: discord_config,
             _cancel_rx: cancel_rx,
-            _discord_config: config.discord.clone(),
         }
     }
 }
 #[serenity::async_trait]
 impl CommandHandler for Handler {
-    fn registerable_commands(&self) -> Vec<String> {
-        vec![constant::commands::EXECUTE.to_string()]
+    fn name(&self) -> &str {
+        constant::commands::EXECUTE
     }
 
     async fn register(&self, http: &Http) -> anyhow::Result<()> {
@@ -32,10 +32,6 @@ impl CommandHandler for Handler {
         )
         .await?;
         Ok(())
-    }
-
-    fn can_handle_command(&self, cmd: &CommandInteraction) -> bool {
-        cmd.data.name == constant::commands::EXECUTE
     }
 
     async fn run(&self, http: &Http, cmd: &CommandInteraction) -> anyhow::Result<()> {

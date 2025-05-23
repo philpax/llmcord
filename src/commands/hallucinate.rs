@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::Context;
 use async_openai::types::{
@@ -24,95 +24,79 @@ use super::CommandHandler;
 
 pub struct Handler {
     cancel_rx: flume::Receiver<MessageId>,
-    commands: HashMap<String, config::Command>,
+    name: String,
+    command: config::Command,
     discord_config: config::Discord,
     ai: Arc<Ai>,
 }
 impl Handler {
     pub fn new(
-        config: &config::Configuration,
+        command: config::Command,
+        name: String,
+        discord_config: config::Discord,
         cancel_rx: flume::Receiver<MessageId>,
         ai: Arc<Ai>,
     ) -> Self {
         Self {
             cancel_rx,
-            commands: config.commands.clone(),
-            discord_config: config.discord.clone(),
+            name,
+            command,
+            discord_config,
             ai,
         }
     }
 }
 #[serenity::async_trait]
 impl CommandHandler for Handler {
-    fn registerable_commands(&self) -> Vec<String> {
-        self.commands
-            .iter()
-            .filter(|(_, v)| v.enabled)
-            .map(|(name, _)| name.clone())
-            .collect()
+    fn name(&self) -> &str {
+        &self.name
     }
 
     async fn register(&self, http: &Http) -> anyhow::Result<()> {
-        for (name, command) in self.commands.iter().filter(|(_, v)| v.enabled) {
-            let mut model_option = CreateCommandOption::new(
-                CommandOptionType::String,
-                constant::value::MODEL,
-                "The model to use.",
-            )
-            .required(true);
-
-            for model in &self.ai.models {
-                model_option = model_option.add_string_choice(model, model);
-            }
-
-            Command::create_global_command(
-                http,
-                CreateCommand::new(name)
-                    .description(command.description.as_str())
-                    .add_option(model_option)
-                    .add_option(
-                        CreateCommandOption::new(
-                            CommandOptionType::String,
-                            constant::value::PROMPT,
-                            "The prompt.",
-                        )
-                        .required(true),
-                    )
-                    .add_option(
-                        CreateCommandOption::new(
-                            CommandOptionType::Integer,
-                            constant::value::SEED,
-                            "The seed to use for sampling.",
-                        )
-                        .min_int_value(0)
-                        .required(false),
-                    ),
-            )
-            .await?;
+        if !self.command.enabled {
+            return Ok(());
         }
+
+        let mut model_option = CreateCommandOption::new(
+            CommandOptionType::String,
+            constant::value::MODEL,
+            "The model to use.",
+        )
+        .required(true);
+
+        for model in &self.ai.models {
+            model_option = model_option.add_string_choice(model, model);
+        }
+
+        Command::create_global_command(
+            http,
+            CreateCommand::new(self.name.clone())
+                .description(self.command.description.as_str())
+                .add_option(model_option)
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        constant::value::PROMPT,
+                        "The prompt.",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::Integer,
+                        constant::value::SEED,
+                        "The seed to use for sampling.",
+                    )
+                    .min_int_value(0)
+                    .required(false),
+                ),
+        )
+        .await?;
 
         Ok(())
     }
 
-    fn can_handle_command(&self, cmd: &CommandInteraction) -> bool {
-        self.commands.contains_key(cmd.data.name.as_str())
-    }
-
     async fn run(&self, http: &Http, cmd: &CommandInteraction) -> anyhow::Result<()> {
-        let command = self
-            .commands
-            .get(cmd.data.name.as_str())
-            .context("no command found")?;
-        self.run_command(http, cmd, command).await
-    }
-}
-impl Handler {
-    async fn run_command(
-        &self,
-        http: &Http,
-        cmd: &CommandInteraction,
-        command: &config::Command,
-    ) -> anyhow::Result<()> {
         use constant::value as v;
         use util::{value_to_integer, value_to_string};
 
@@ -156,7 +140,7 @@ impl Handler {
                     .seed(seed)
                     .messages([
                         ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                            content: command.system_prompt.clone().into(),
+                            content: self.command.system_prompt.clone().into(),
                             name: None,
                         }),
                         ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {

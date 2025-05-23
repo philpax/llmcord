@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashMap, collections::HashSet, sync::Arc};
 
 use anyhow::Context as AnyhowContext;
 use serenity::{
@@ -33,14 +33,25 @@ async fn main() -> anyhow::Result<()> {
     let ai = Arc::new(ai::Ai::load(&config).await?);
 
     let (cancel_tx, cancel_rx) = flume::unbounded::<MessageId>();
-    let handlers: Vec<Box<dyn commands::CommandHandler>> = vec![
-        Box::new(commands::hallucinate::Handler::new(
-            &config,
+    let handlers: HashMap<String, Box<dyn commands::CommandHandler>> = config
+        .commands
+        .iter()
+        .map(|(name, command)| {
+            Box::new(commands::hallucinate::Handler::new(
+                command.clone(),
+                name.to_string(),
+                config.discord.clone(),
+                cancel_rx.clone(),
+                ai.clone(),
+            )) as Box<dyn commands::CommandHandler>
+        })
+        .chain(std::iter::once(Box::new(commands::execute::Handler::new(
+            config.discord.clone(),
             cancel_rx.clone(),
-            ai.clone(),
-        )),
-        Box::new(commands::execute::Handler::new(&config, cancel_rx.clone())),
-    ];
+        ))
+            as Box<dyn commands::CommandHandler>))
+        .map(|handler| (handler.name().to_string(), handler))
+        .collect();
 
     let mut client = Client::builder(discord_token, GatewayIntents::default())
         .event_handler(Handler {
@@ -58,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 pub struct Handler {
-    handlers: Vec<Box<dyn commands::CommandHandler>>,
+    handlers: HashMap<String, Box<dyn commands::CommandHandler>>,
     cancel_tx: flume::Sender<MessageId>,
 }
 #[async_trait]
@@ -91,16 +102,12 @@ impl Handler {
             let cmds = Command::get_global_commands(http).await?;
             cmds.iter().map(|c| c.name.clone()).collect()
         };
-        let our_commands: HashSet<_> = self
-            .handlers
-            .iter()
-            .flat_map(|h| h.registerable_commands())
-            .collect();
+        let our_commands: HashSet<_> = self.handlers.keys().cloned().collect();
         if registered_commands != our_commands {
             Command::set_global_commands(http, vec![]).await?;
         }
 
-        for handler in &self.handlers {
+        for handler in self.handlers.values() {
             handler.register(http).await?;
         }
 
@@ -117,12 +124,11 @@ impl Handler {
         match interaction {
             Interaction::Command(cmd) => {
                 let name = cmd.data.name.as_str();
-                let handler = self
-                    .handlers
-                    .iter()
-                    .find(|h| h.can_handle_command(cmd))
-                    .with_context(|| format!("no handler found for command: {name}"))?;
-                handler.run(http, cmd).await?;
+                if let Some(handler) = self.handlers.get(name) {
+                    handler.run(http, cmd).await?;
+                } else {
+                    anyhow::bail!("no handler found for command: {name}");
+                }
             }
             Interaction::Component(cmp) => {
                 if let Some((message_id, user_id)) = cancel::parse_id(&cmp.data.custom_id) {
