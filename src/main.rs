@@ -1,10 +1,20 @@
-use anyhow::Context as AnyhowContext;
-use serenity::{Client, model::prelude::*};
+use std::collections::HashSet;
 
+use anyhow::Context as AnyhowContext;
+use serenity::{
+    Client,
+    all::{
+        Command, Context, CreateInteractionResponse, CreateInteractionResponseMessage,
+        EventHandler, Http, Interaction, MessageId, Ready,
+    },
+    async_trait,
+    model::prelude::GatewayIntents,
+};
+
+mod cancel;
 mod commands;
 mod config;
 mod constant;
-mod handler;
 mod outputter;
 mod util;
 
@@ -13,22 +23,119 @@ use config::Configuration;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Configuration::load()?;
+    let discord_token = config
+        .authentication
+        .discord_token
+        .as_deref()
+        .context("Expected authentication.discord_token to be filled in config")?;
 
-    let mut client = Client::builder(
-        config
-            .authentication
-            .discord_token
-            .as_deref()
-            .context("Expected authentication.discord_token to be filled in config")?,
-        GatewayIntents::default(),
-    )
-    .event_handler(handler::Handler::new(config).await?)
-    .await
-    .context("Error creating client")?;
+    let (cancel_tx, cancel_rx) = flume::unbounded::<MessageId>();
+    let handlers: Vec<Box<dyn commands::CommandHandler>> = vec![
+        Box::new(commands::hallucinate::Handler::new(&config, cancel_rx.clone()).await?),
+        Box::new(commands::execute::Handler::new(&config, cancel_rx.clone()).await?),
+    ];
+
+    let mut client = Client::builder(discord_token, GatewayIntents::default())
+        .event_handler(Handler {
+            handlers,
+            cancel_tx,
+        })
+        .await
+        .context("Error creating client")?;
 
     if let Err(why) = client.start().await {
         println!("Client error: {why:?}");
     }
 
     Ok(())
+}
+
+pub struct Handler {
+    handlers: Vec<Box<dyn commands::CommandHandler>>,
+    cancel_tx: flume::Sender<MessageId>,
+}
+#[async_trait]
+impl EventHandler for Handler {
+    async fn ready(&self, ctx: Context, ready: Ready) {
+        self.ready_impl(&ctx.http, ready)
+            .await
+            .expect("Error while registering commands");
+    }
+
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        let Some(respondable) = util::interaction_to_respondable_interaction(&interaction) else {
+            panic!("Unknown interaction type: {interaction:?}");
+        };
+
+        if let Err(err) = self.interaction_create_impl(&ctx.http, &interaction).await {
+            respondable
+                .create_or_edit(&ctx.http, &format!("Error: {err}"))
+                .await
+                .unwrap();
+        }
+    }
+}
+impl Handler {
+    async fn ready_impl(&self, http: &Http, ready: Ready) -> anyhow::Result<()> {
+        println!("{} is connected; registering commands...", ready.user.name);
+
+        // Check if we need to reset our registered commands
+        let registered_commands: HashSet<_> = {
+            let cmds = Command::get_global_commands(http).await?;
+            cmds.iter().map(|c| c.name.clone()).collect()
+        };
+        let our_commands: HashSet<_> = self
+            .handlers
+            .iter()
+            .flat_map(|h| h.registerable_commands())
+            .collect();
+        if registered_commands != our_commands {
+            Command::set_global_commands(http, vec![]).await?;
+        }
+
+        for handler in &self.handlers {
+            handler.register(http).await?;
+        }
+
+        println!("{} is good to go!", ready.user.name);
+
+        Ok(())
+    }
+
+    async fn interaction_create_impl(
+        &self,
+        http: &Http,
+        interaction: &Interaction,
+    ) -> anyhow::Result<()> {
+        match interaction {
+            Interaction::Command(cmd) => {
+                let name = cmd.data.name.as_str();
+                let handler = self
+                    .handlers
+                    .iter()
+                    .find(|h| h.can_handle_command(cmd))
+                    .with_context(|| format!("no handler found for command: {name}"))?;
+                handler.run(http, cmd).await?;
+            }
+            Interaction::Component(cmp) => {
+                if let Some((message_id, user_id)) = cancel::parse_id(&cmp.data.custom_id) {
+                    if cmp.user.id != user_id {
+                        return Ok(());
+                    }
+
+                    self.cancel_tx.send(message_id).ok();
+                    cmp.create_response(
+                        http,
+                        CreateInteractionResponse::UpdateMessage(
+                            CreateInteractionResponseMessage::new(),
+                        ),
+                    )
+                    .await
+                    .ok();
+                }
+            }
+            _ => {}
+        };
+        Ok(())
+    }
 }

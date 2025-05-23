@@ -1,7 +1,6 @@
 use serenity::all::{
-    ButtonStyle, CommandInteraction, CreateActionRow, CreateAllowedMentions, CreateButton,
-    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditMessage, Http,
-    Message, MessageId, UserId,
+    CommandInteraction, CreateAllowedMentions, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, EditMessage, Http, Message, UserId,
 };
 
 pub struct Outputter<'a> {
@@ -125,7 +124,7 @@ impl<'a> Outputter<'a> {
             if let Some(last) = self.messages.last_mut() {
                 // TODO: if-let chain, 1.88
                 if last.components.is_empty() {
-                    add_cancel_button(self.http, first_id, last, self.user_id).await?;
+                    crate::cancel::add_button(self.http, first_id, last, self.user_id).await?;
                 }
             }
         }
@@ -153,24 +152,6 @@ impl<'a> Outputter<'a> {
 
         Ok(())
     }
-}
-
-async fn add_cancel_button(
-    http: &Http,
-    first_id: MessageId,
-    msg: &mut Message,
-    user_id: UserId,
-) -> anyhow::Result<()> {
-    Ok(msg
-        .edit(
-            http,
-            EditMessage::new().components(vec![CreateActionRow::Buttons(vec![
-                CreateButton::new(format!("cancel#{first_id}#{user_id}"))
-                    .style(ButtonStyle::Danger)
-                    .label("Cancel"),
-            ])]),
-        )
-        .await?)
 }
 
 async fn reply_to_message_without_mentions(

@@ -1,5 +1,4 @@
 use serenity::{all::*, async_trait};
-use std::future::Future;
 
 pub fn get_value<'a>(
     options: &'a [CommandDataOption],
@@ -24,7 +23,7 @@ pub fn value_to_integer(v: &CommandDataOptionValue) -> Option<i64> {
 
 #[async_trait]
 #[allow(unused)]
-pub trait DiscordInteraction: Send + Sync {
+pub trait RespondableInteraction: Send + Sync {
     async fn create(&self, http: &Http, message: &str) -> anyhow::Result<()>;
     async fn get_interaction_message(&self, http: &Http) -> anyhow::Result<Message>;
     async fn edit(&self, http: &Http, message: &str) -> anyhow::Result<()>;
@@ -35,10 +34,10 @@ pub trait DiscordInteraction: Send + Sync {
     fn message(&self) -> Option<&Message>;
     fn user(&self) -> &User;
 }
-macro_rules! implement_interaction {
+macro_rules! implement_respondable_interaction {
     ($name:ident) => {
         #[async_trait]
-        impl DiscordInteraction for $name {
+        impl RespondableInteraction for $name {
             async fn create(&self, http: &Http, msg: &str) -> anyhow::Result<()> {
                 Ok(self
                     .create_response(
@@ -78,11 +77,11 @@ macro_rules! implement_interaction {
             fn user(&self) -> &User {
                 &self.user
             }
-            interaction_message!($name);
+            respondable_interaction_message!($name);
         }
     };
 }
-macro_rules! interaction_message {
+macro_rules! respondable_interaction_message {
     (CommandInteraction) => {
         fn message(&self) -> Option<&Message> {
             None
@@ -99,20 +98,17 @@ macro_rules! interaction_message {
         }
     };
 }
-implement_interaction!(CommandInteraction);
-implement_interaction!(ComponentInteraction);
-implement_interaction!(ModalInteraction);
+implement_respondable_interaction!(CommandInteraction);
+implement_respondable_interaction!(ComponentInteraction);
+implement_respondable_interaction!(ModalInteraction);
 
-/// Runs the [body] and edits the interaction response if an error occurs.
-pub async fn run_and_report_error(
-    interaction: &dyn DiscordInteraction,
-    http: &Http,
-    body: impl Future<Output = anyhow::Result<()>>,
-) {
-    if let Err(err) = body.await {
-        interaction
-            .create_or_edit(http, &format!("Error: {err}"))
-            .await
-            .unwrap();
+pub fn interaction_to_respondable_interaction(
+    interaction: &Interaction,
+) -> Option<&dyn RespondableInteraction> {
+    match interaction {
+        Interaction::Command(cmd) => Some(cmd),
+        Interaction::Component(cmp) => Some(cmp),
+        Interaction::Modal(modal) => Some(modal),
+        _ => None,
     }
 }

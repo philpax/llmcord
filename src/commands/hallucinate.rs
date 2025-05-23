@@ -16,19 +16,19 @@ use serenity::{
 use crate::{
     config, constant,
     outputter::Outputter,
-    util::{self, DiscordInteraction},
+    util::{self, RespondableInteraction},
 };
 
 use super::CommandHandler;
 
-pub struct HallucinateHandler {
+pub struct Handler {
     cancel_rx: flume::Receiver<MessageId>,
     client: async_openai::Client<async_openai::config::OpenAIConfig>,
     models: Vec<String>,
     commands: HashMap<String, config::Command>,
     discord_config: config::Discord,
 }
-impl HallucinateHandler {
+impl Handler {
     pub async fn new(
         config: &config::Configuration,
         cancel_rx: flume::Receiver<MessageId>,
@@ -61,7 +61,7 @@ impl HallucinateHandler {
     }
 }
 #[serenity::async_trait]
-impl CommandHandler for HallucinateHandler {
+impl CommandHandler for Handler {
     fn registerable_commands(&self) -> Vec<String> {
         self.commands
             .iter()
@@ -124,7 +124,7 @@ impl CommandHandler for HallucinateHandler {
         self.run_command(http, cmd, command).await
     }
 }
-impl HallucinateHandler {
+impl Handler {
     async fn run_command(
         &self,
         http: &Http,

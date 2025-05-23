@@ -7,11 +7,11 @@ use crate::{config, constant};
 
 use super::CommandHandler;
 
-pub struct Execute {
+pub struct Handler {
     _cancel_rx: flume::Receiver<MessageId>,
     _discord_config: config::Discord,
 }
-impl Execute {
+impl Handler {
     pub async fn new(
         config: &config::Configuration,
         cancel_rx: flume::Receiver<MessageId>,
@@ -23,7 +23,7 @@ impl Execute {
     }
 }
 #[serenity::async_trait]
-impl CommandHandler for Execute {
+impl CommandHandler for Handler {
     fn registerable_commands(&self) -> Vec<String> {
         vec![constant::commands::EXECUTE.to_string()]
     }
