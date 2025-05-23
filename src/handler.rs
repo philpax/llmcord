@@ -53,9 +53,29 @@ impl EventHandler for Handler {
         match interaction {
             Interaction::Command(cmd) => {
                 let name = cmd.data.name.as_str();
-                let commands = &self.config.commands;
 
-                if let Some(command) = commands.get(name) {
+                if name == constant::commands::EXECUTE {
+                    util::run_and_report_error(&cmd, http, {
+                        let cmd = &cmd;
+                        async move {
+                            let code = &cmd
+                                .data
+                                .resolved
+                                .messages
+                                .iter()
+                                .next()
+                                .context("no message found")?
+                                .1
+                                .content;
+                            let data = CreateInteractionResponseMessage::new()
+                                .content(format!("Executing code:\n{code}"));
+                            let builder = CreateInteractionResponse::Message(data);
+                            cmd.create_response(http, builder).await?;
+                            Ok(())
+                        }
+                    })
+                    .await;
+                } else if let Some(command) = self.config.commands.get(name) {
                     util::run_and_report_error(
                         &cmd,
                         http,
@@ -113,6 +133,7 @@ async fn ready_handler(
         .iter()
         .filter(|(_, v)| v.enabled)
         .map(|(k, _)| k.as_str())
+        .chain(std::iter::once(constant::commands::EXECUTE))
         .collect();
 
     if registered_commands != our_commands {
@@ -158,6 +179,12 @@ async fn ready_handler(
         )
         .await?;
     }
+
+    Command::create_global_command(
+        http,
+        CreateCommand::new(constant::commands::EXECUTE).kind(CommandType::Message),
+    )
+    .await?;
 
     Ok(())
 }
@@ -349,20 +376,20 @@ impl<'a> Outputter<'a> {
             // Delete excess messages
             for msg in self.messages.drain(self.chunks.len()..) {
                 msg.delete(self.http).await?;
-        }
+            }
         } else if self.chunks.len() > self.messages.len() {
-        // Remove the cancel button from all existing messages
-        for msg in &mut self.messages {
-            msg.edit(
-                self.http,
-                EditMessage::new()
-                    .components(vec![])
-                    .allowed_mentions(CreateAllowedMentions::new()),
-            )
-            .await?;
-        }
+            // Remove the cancel button from all existing messages
+            for msg in &mut self.messages {
+                msg.edit(
+                    self.http,
+                    EditMessage::new()
+                        .components(vec![])
+                        .allowed_mentions(CreateAllowedMentions::new()),
+                )
+                .await?;
+            }
 
-        // Create new messages for the remaining chunks
+            // Create new messages for the remaining chunks
             for chunk in self.chunks[self.messages.len()..].iter() {
                 let last = self.messages.last_mut().unwrap();
                 let msg = reply_to_message_without_mentions(self.http, last, chunk).await?;
@@ -379,7 +406,7 @@ impl<'a> Outputter<'a> {
             if let Some(last) = self.messages.last_mut() {
                 // TODO: if-let chain, 1.88
                 if last.components.is_empty() {
-                add_cancel_button(self.http, first_id, last, self.user_id).await?;
+                    add_cancel_button(self.http, first_id, last, self.user_id).await?;
                 }
             }
         }
@@ -421,7 +448,7 @@ async fn add_cancel_button(
             http,
             EditMessage::new().components(vec![CreateActionRow::Buttons(vec![
                 CreateButton::new(format!("cancel#{first_id}#{user_id}"))
-            .style(ButtonStyle::Danger)
+                    .style(ButtonStyle::Danger)
                     .label("Cancel"),
             ])]),
         )
