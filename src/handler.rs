@@ -38,17 +38,91 @@ impl Handler {
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
-        println!("{} is connected; registering commands...", ready.user.name);
-
-        if let Err(err) = ready_handler(&ctx.http, &self.config, &self.models).await {
+        if let Err(err) = self.ready_impl(&ctx.http, ready).await {
             println!("Error while registering commands: `{err}`");
             std::process::exit(1);
         }
-
-        println!("{} is good to go!", ready.user.name);
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        self.interaction_create_impl(ctx, interaction).await;
+    }
+}
+impl Handler {
+    async fn ready_impl(&self, http: &Http, ready: Ready) -> anyhow::Result<()> {
+        println!("{} is connected; registering commands...", ready.user.name);
+
+        let registered_commands = Command::get_global_commands(http).await?;
+        let registered_commands: HashSet<_> = registered_commands
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+
+        let our_commands: HashSet<_> = self
+            .config
+            .commands
+            .iter()
+            .filter(|(_, v)| v.enabled)
+            .map(|(k, _)| k.as_str())
+            .chain(std::iter::once(constant::commands::EXECUTE))
+            .collect();
+
+        if registered_commands != our_commands {
+            // If the commands registered with Discord don't match the commands configured
+            // for this bot, reset them entirely.
+            Command::set_global_commands(http, vec![]).await?;
+        }
+
+        for (name, command) in self.config.commands.iter().filter(|(_, v)| v.enabled) {
+            let mut model_option = CreateCommandOption::new(
+                CommandOptionType::String,
+                constant::value::MODEL,
+                "The model to use.",
+            )
+            .required(true);
+
+            for model in &self.models {
+                model_option = model_option.add_string_choice(model, model);
+            }
+
+            Command::create_global_command(
+                http,
+                CreateCommand::new(name)
+                    .description(command.description.as_str())
+                    .add_option(model_option)
+                    .add_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::String,
+                            constant::value::PROMPT,
+                            "The prompt.",
+                        )
+                        .required(true),
+                    )
+                    .add_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::Integer,
+                            constant::value::SEED,
+                            "The seed to use for sampling.",
+                        )
+                        .min_int_value(0)
+                        .required(false),
+                    ),
+            )
+            .await?;
+        }
+
+        Command::create_global_command(
+            http,
+            CreateCommand::new(constant::commands::EXECUTE).kind(CommandType::Message),
+        )
+        .await?;
+
+        println!("{} is good to go!", ready.user.name);
+
+        Ok(())
+    }
+
+    async fn interaction_create_impl(&self, ctx: Context, interaction: Interaction) {
         let http = &ctx.http;
         match interaction {
             Interaction::Command(cmd) => {
@@ -115,78 +189,6 @@ impl EventHandler for Handler {
             _ => {}
         };
     }
-}
-
-async fn ready_handler(
-    http: &Http,
-    config: &config::Configuration,
-    models: &[String],
-) -> anyhow::Result<()> {
-    let registered_commands = Command::get_global_commands(http).await?;
-    let registered_commands: HashSet<_> = registered_commands
-        .iter()
-        .map(|c| c.name.as_str())
-        .collect();
-
-    let our_commands: HashSet<_> = config
-        .commands
-        .iter()
-        .filter(|(_, v)| v.enabled)
-        .map(|(k, _)| k.as_str())
-        .chain(std::iter::once(constant::commands::EXECUTE))
-        .collect();
-
-    if registered_commands != our_commands {
-        // If the commands registered with Discord don't match the commands configured
-        // for this bot, reset them entirely.
-        Command::set_global_commands(http, vec![]).await?;
-    }
-
-    for (name, command) in config.commands.iter().filter(|(_, v)| v.enabled) {
-        let mut model_option = CreateCommandOption::new(
-            CommandOptionType::String,
-            constant::value::MODEL,
-            "The model to use.",
-        )
-        .required(true);
-
-        for model in models {
-            model_option = model_option.add_string_choice(model, model);
-        }
-
-        Command::create_global_command(
-            http,
-            CreateCommand::new(name)
-                .description(command.description.as_str())
-                .add_option(model_option)
-                .add_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::String,
-                        constant::value::PROMPT,
-                        "The prompt.",
-                    )
-                    .required(true),
-                )
-                .add_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::Integer,
-                        constant::value::SEED,
-                        "The seed to use for sampling.",
-                    )
-                    .min_int_value(0)
-                    .required(false),
-                ),
-        )
-        .await?;
-    }
-
-    Command::create_global_command(
-        http,
-        CreateCommand::new(constant::commands::EXECUTE).kind(CommandType::Message),
-    )
-    .await?;
-
-    Ok(())
 }
 
 async fn hallucinate(
