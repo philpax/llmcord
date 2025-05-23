@@ -12,14 +12,11 @@ pub struct Handler {
     _discord_config: config::Discord,
 }
 impl Handler {
-    pub async fn new(
-        config: &config::Configuration,
-        cancel_rx: flume::Receiver<MessageId>,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
+    pub fn new(config: &config::Configuration, cancel_rx: flume::Receiver<MessageId>) -> Self {
+        Self {
             _cancel_rx: cancel_rx,
             _discord_config: config.discord.clone(),
-        })
+        }
     }
 }
 #[serenity::async_trait]

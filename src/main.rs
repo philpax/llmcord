@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Context as AnyhowContext;
 use serenity::{
@@ -11,6 +11,7 @@ use serenity::{
     model::prelude::GatewayIntents,
 };
 
+mod ai;
 mod cancel;
 mod commands;
 mod config;
@@ -29,10 +30,16 @@ async fn main() -> anyhow::Result<()> {
         .as_deref()
         .context("Expected authentication.discord_token to be filled in config")?;
 
+    let ai = Arc::new(ai::Ai::load(&config).await?);
+
     let (cancel_tx, cancel_rx) = flume::unbounded::<MessageId>();
     let handlers: Vec<Box<dyn commands::CommandHandler>> = vec![
-        Box::new(commands::hallucinate::Handler::new(&config, cancel_rx.clone()).await?),
-        Box::new(commands::execute::Handler::new(&config, cancel_rx.clone()).await?),
+        Box::new(commands::hallucinate::Handler::new(
+            &config,
+            cancel_rx.clone(),
+            ai.clone(),
+        )),
+        Box::new(commands::execute::Handler::new(&config, cancel_rx.clone())),
     ];
 
     let mut client = Client::builder(discord_token, GatewayIntents::default())

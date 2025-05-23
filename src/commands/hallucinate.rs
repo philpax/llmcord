@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context;
 use async_openai::types::{
@@ -14,6 +14,7 @@ use serenity::{
 };
 
 use crate::{
+    ai::Ai,
     config, constant,
     outputter::Outputter,
     util::{self, RespondableInteraction},
@@ -23,41 +24,22 @@ use super::CommandHandler;
 
 pub struct Handler {
     cancel_rx: flume::Receiver<MessageId>,
-    client: async_openai::Client<async_openai::config::OpenAIConfig>,
-    models: Vec<String>,
     commands: HashMap<String, config::Command>,
     discord_config: config::Discord,
+    ai: Arc<Ai>,
 }
 impl Handler {
-    pub async fn new(
+    pub fn new(
         config: &config::Configuration,
         cancel_rx: flume::Receiver<MessageId>,
-    ) -> anyhow::Result<Self> {
-        let mut openai_config = async_openai::config::OpenAIConfig::default();
-        if let Some(openai_api_server) = config.authentication.openai_api_server.as_deref() {
-            openai_config = openai_config.with_api_base(openai_api_server);
-        }
-        if let Some(openai_api_key) = config.authentication.openai_api_key.as_deref() {
-            openai_config = openai_config.with_api_key(openai_api_key);
-        }
-        let client = async_openai::Client::with_config(openai_config);
-
-        let models: Vec<_> = client
-            .models()
-            .list()
-            .await?
-            .data
-            .into_iter()
-            .map(|m| m.id)
-            .collect();
-
-        Ok(Self {
+        ai: Arc<Ai>,
+    ) -> Self {
+        Self {
             cancel_rx,
-            client,
-            models,
             commands: config.commands.clone(),
             discord_config: config.discord.clone(),
-        })
+            ai,
+        }
     }
 }
 #[serenity::async_trait]
@@ -79,7 +61,7 @@ impl CommandHandler for Handler {
             )
             .required(true);
 
-            for model in &self.models {
+            for model in &self.ai.models {
                 model_option = model_option.add_string_choice(model, model);
             }
 
@@ -165,6 +147,7 @@ impl Handler {
         let message_id = message.id;
 
         let mut stream = self
+            .ai
             .client
             .chat()
             .create_stream(
