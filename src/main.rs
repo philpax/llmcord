@@ -1,9 +1,10 @@
 use anyhow::Context as AnyhowContext;
-use serenity::{model::prelude::*, Client};
+use serenity::{Client, model::prelude::*};
 
 mod config;
 mod constant;
 mod handler;
+mod outputter;
 mod util;
 
 use config::Configuration;
