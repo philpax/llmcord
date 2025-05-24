@@ -1,5 +1,11 @@
 use std::sync::Arc;
 
+use async_openai::types::{
+    ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
+    ChatCompletionRequestSystemMessage, ChatCompletionRequestUserMessage,
+};
+use serenity::futures::StreamExt as _;
+
 use crate::ai::Ai;
 
 pub fn register(lua: &mlua::Lua, ai: Arc<Ai>) -> mlua::Result<()> {
@@ -9,6 +15,55 @@ pub fn register(lua: &mlua::Lua, ai: Arc<Ai>) -> mlua::Result<()> {
     register_message(lua, &llm, "system")?;
     register_message(lua, &llm, "user")?;
     register_message(lua, &llm, "assistant")?;
+
+    llm.set(
+        "by_token",
+        lua.create_async_function({
+            let client = ai.client.clone();
+            move |_lua, args: mlua::Table| {
+                let client = client.clone();
+                async move {
+                    let model = args.get::<String>("model")?;
+                    let seed = if args.contains_key("seed")? {
+                        args.get::<u32>("seed")?
+                    } else {
+                        0
+                    };
+                    let messages = args.get::<mlua::Table>("messages")?;
+                    let callback = args.get::<mlua::Function>("callback")?;
+
+                    let messages: Vec<ChatCompletionRequestMessage> = messages
+                        .sequence_values::<mlua::Table>()
+                        .map(|table| from_message_table_to_message(table?))
+                        .collect::<mlua::Result<Vec<_>>>()?;
+
+                    let mut stream = client
+                        .chat()
+                        .create_stream(
+                            async_openai::types::CreateChatCompletionRequestArgs::default()
+                                .model(model.clone())
+                                .seed(seed)
+                                .messages(messages)
+                                .stream(true)
+                                .build()
+                                .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?,
+                        )
+                        .await
+                        .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?;
+
+                    while let Some(response) = stream.next().await {
+                        if let Ok(response) = response {
+                            if let Some(content) = &response.choices[0].delta.content {
+                                callback.call::<()>(content.clone())?;
+                            }
+                        }
+                    }
+
+                    Ok(())
+                }
+            }
+        })?,
+    )?;
 
     lua.globals().set("llm", llm)?;
 
@@ -36,4 +91,41 @@ fn register_message(lua: &mlua::Lua, table: &mlua::Table, role: &str) -> mlua::R
     })?;
 
     table.set(role, f)
+}
+
+fn from_message_table_to_message(table: mlua::Table) -> mlua::Result<ChatCompletionRequestMessage> {
+    let role = table.get::<String>("role")?;
+    let content = table.get::<String>("content")?;
+    let name = if table.contains_key("name")? {
+        Some(table.get::<String>("name")?)
+    } else {
+        None
+    };
+
+    match role.as_str() {
+        "system" => Ok(ChatCompletionRequestMessage::System(
+            ChatCompletionRequestSystemMessage {
+                content: content.into(),
+                name,
+            },
+        )),
+        "user" => Ok(ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage {
+                content: content.into(),
+                name,
+            },
+        )),
+        "assistant" => Ok(ChatCompletionRequestMessage::Assistant(
+            ChatCompletionRequestAssistantMessage {
+                content: Some(content.into()),
+                name,
+                ..Default::default()
+            },
+        )),
+        _ => Err(mlua::Error::FromLuaConversionError {
+            from: "table",
+            to: "ChatCompletionRequestMessage".to_string(),
+            message: Some(format!("unknown role `{role}`")),
+        }),
+    }
 }
