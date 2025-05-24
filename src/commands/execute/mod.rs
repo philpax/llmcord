@@ -10,6 +10,8 @@ use crate::{ai::Ai, config, outputter::Outputter};
 pub mod app;
 pub mod slash;
 
+mod extensions;
+
 #[derive(Clone)]
 pub struct Handler {
     discord_config: config::Discord,
@@ -46,7 +48,7 @@ impl Handler {
 
         let code = parse_markdown_lua_block(unparsed_code).unwrap_or(unparsed_code);
 
-        let lua = create_lua_state(&self.ai.models)?;
+        let lua = create_lua_state(self.ai.clone())?;
         let mut thread = load_async_expression::<Option<String>>(&lua, code)?;
 
         let mut errored = false;
@@ -80,7 +82,7 @@ impl Handler {
     }
 }
 
-fn create_lua_state(models: &[String]) -> mlua::Result<mlua::Lua> {
+fn create_lua_state(ai: Arc<Ai>) -> mlua::Result<mlua::Lua> {
     let lua = mlua::Lua::new_with(
         {
             use mlua::StdLib as SL;
@@ -89,37 +91,9 @@ fn create_lua_state(models: &[String]) -> mlua::Result<mlua::Lua> {
         mlua::LuaOptions::new().catch_rust_panics(true),
     )?;
 
-    lua.globals().set(
-        "sleep",
-        lua.create_async_function(|_lua, ms: u32| async move {
-            tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
-            Ok(())
-        })?,
-    )?;
-
-    lua.globals().set(
-        "yield",
-        lua.globals()
-            .get("coroutine")
-            .and_then(|c: mlua::Table| c.get::<mlua::Function>("yield"))?,
-    )?;
-
-    lua.globals().set("llm", create_llm_table(&lua, models)?)?;
-
-    lua.globals().set(
-        "inspect",
-        lua.load(include_str!("../../../vendor/inspect.lua/inspect.lua"))
-            .eval::<mlua::Value>()?,
-    )?;
+    extensions::register(&lua, ai)?;
 
     Ok(lua)
-}
-
-fn create_llm_table(lua: &mlua::Lua, models: &[String]) -> mlua::Result<mlua::Table> {
-    let llm = lua.create_table()?;
-    llm.set("models", models)?;
-
-    Ok(llm)
 }
 
 fn load_async_expression<R: mlua::FromLuaMulti>(
