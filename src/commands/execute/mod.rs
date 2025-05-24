@@ -1,65 +1,86 @@
+use std::sync::Arc;
+
 use serenity::{
     all::{CommandInteraction, Http, MessageId},
     futures::StreamExt as _,
 };
 
-use crate::outputter::Outputter;
+use crate::{ai::Ai, config, outputter::Outputter};
 
 pub mod app;
 pub mod slash;
 
-async fn run(
-    http: &Http,
-    cmd: &CommandInteraction,
-    discord_config: &crate::config::Discord,
-    cancel_rx: &flume::Receiver<MessageId>,
-    unparsed_code: &str,
-) -> anyhow::Result<()> {
-    let mut outputter = Outputter::new(
-        http,
-        cmd,
-        std::time::Duration::from_millis(discord_config.message_update_interval_ms),
-        "Executing...",
-    )
-    .await?;
-    let starting_message_id = outputter.starting_message_id();
-
-    let code = parse_markdown_lua_block(unparsed_code).unwrap_or(unparsed_code);
-
-    let lua = create_lua_state()?;
-    let mut thread = load_async_expression::<Option<String>>(&lua, code)?;
-
-    let mut errored = false;
-    while let Some(result) = thread.next().await {
-        if let Ok(cancel_message_id) = cancel_rx.try_recv() {
-            if cancel_message_id == starting_message_id {
-                outputter.cancelled().await?;
-                errored = true;
-                break;
-            }
+#[derive(Clone)]
+pub struct Handler {
+    discord_config: config::Discord,
+    cancel_rx: flume::Receiver<MessageId>,
+    ai: Arc<Ai>,
+}
+impl Handler {
+    pub fn new(
+        discord_config: config::Discord,
+        cancel_rx: flume::Receiver<MessageId>,
+        ai: Arc<Ai>,
+    ) -> Self {
+        Self {
+            discord_config,
+            cancel_rx,
+            ai,
         }
+    }
 
-        match result {
-            Ok(result) => {
-                if let Some(result) = result {
-                    outputter.update(&result).await?;
+    async fn run(
+        &self,
+        http: &Http,
+        cmd: &CommandInteraction,
+        unparsed_code: &str,
+    ) -> anyhow::Result<()> {
+        let mut outputter = Outputter::new(
+            http,
+            cmd,
+            std::time::Duration::from_millis(self.discord_config.message_update_interval_ms),
+            "Executing...",
+        )
+        .await?;
+        let starting_message_id = outputter.starting_message_id();
+
+        let code = parse_markdown_lua_block(unparsed_code).unwrap_or(unparsed_code);
+
+        let lua = create_lua_state(&self.ai.models)?;
+        let mut thread = load_async_expression::<Option<String>>(&lua, code)?;
+
+        let mut errored = false;
+        while let Some(result) = thread.next().await {
+            if let Ok(cancel_message_id) = self.cancel_rx.try_recv() {
+                if cancel_message_id == starting_message_id {
+                    outputter.cancelled().await?;
+                    errored = true;
+                    break;
                 }
             }
-            Err(err) => {
-                outputter.error(&err.to_string()).await?;
-                errored = true;
-                break;
+
+            match result {
+                Ok(result) => {
+                    if let Some(result) = result {
+                        outputter.update(&result).await?;
+                    }
+                }
+                Err(err) => {
+                    outputter.error(&err.to_string()).await?;
+                    errored = true;
+                    break;
+                }
             }
         }
-    }
-    if !errored {
-        outputter.finish().await?;
-    }
+        if !errored {
+            outputter.finish().await?;
+        }
 
-    Ok(())
+        Ok(())
+    }
 }
 
-fn create_lua_state() -> mlua::Result<mlua::Lua> {
+fn create_lua_state(models: &[String]) -> mlua::Result<mlua::Lua> {
     let lua = mlua::Lua::new_with(
         {
             use mlua::StdLib as SL;
@@ -83,7 +104,16 @@ fn create_lua_state() -> mlua::Result<mlua::Lua> {
             .and_then(|c: mlua::Table| c.get::<mlua::Function>("yield"))?,
     )?;
 
+    lua.globals().set("llm", create_llm_table(&lua, models)?)?;
+
     Ok(lua)
+}
+
+fn create_llm_table(lua: &mlua::Lua, models: &[String]) -> mlua::Result<mlua::Table> {
+    let llm = lua.create_table()?;
+    llm.set("models", models)?;
+
+    Ok(llm)
 }
 
 fn load_async_expression<R: mlua::FromLuaMulti>(

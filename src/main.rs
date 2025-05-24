@@ -45,16 +45,18 @@ async fn main() -> anyhow::Result<()> {
                 ai.clone(),
             )) as Box<dyn commands::CommandHandler>
         })
-        .chain([
-            Box::new(commands::execute::app::Handler::new(
+        .chain({
+            let base = commands::execute::Handler::new(
                 config.discord.clone(),
                 cancel_rx.clone(),
-            )) as Box<dyn commands::CommandHandler>,
-            Box::new(commands::execute::slash::Handler::new(
-                config.discord.clone(),
-                cancel_rx.clone(),
-            )) as Box<dyn commands::CommandHandler>,
-        ])
+                ai.clone(),
+            );
+            [
+                Box::new(commands::execute::app::Handler::new(base.clone()))
+                    as Box<dyn commands::CommandHandler>,
+                Box::new(commands::execute::slash::Handler::new(base)),
+            ]
+        })
         .map(|handler| (handler.name().to_string(), handler))
         .collect();
 

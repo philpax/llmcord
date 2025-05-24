@@ -1,22 +1,17 @@
 use serenity::all::{
     Command, CommandInteraction, CommandOptionType, CreateCommand, CreateCommandOption, Http,
-    MessageId,
 };
 
-use crate::{config, constant, util};
+use crate::{constant, util};
 
 use crate::commands::CommandHandler;
 
 pub struct Handler {
-    discord_config: config::Discord,
-    cancel_rx: flume::Receiver<MessageId>,
+    base: super::Handler,
 }
 impl Handler {
-    pub fn new(discord_config: config::Discord, cancel_rx: flume::Receiver<MessageId>) -> Self {
-        Self {
-            discord_config,
-            cancel_rx,
-        }
+    pub fn new(base: super::Handler) -> Self {
+        Self { base }
     }
 }
 #[serenity::async_trait]
@@ -73,13 +68,6 @@ impl CommandHandler for Handler {
             (None, None) => anyhow::bail!("no message ID or code specified"),
         };
 
-        super::run(
-            http,
-            cmd,
-            &self.discord_config,
-            &self.cancel_rx,
-            &unparsed_code,
-        )
-        .await
+        self.base.run(http, cmd, &unparsed_code).await
     }
 }
