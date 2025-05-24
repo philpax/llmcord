@@ -1,89 +1,63 @@
 use anyhow::Context as _;
 use serenity::{
-    all::{Command, CommandInteraction, CommandType, CreateCommand, Http, MessageId},
-    futures::StreamExt,
+    all::{CommandInteraction, Http, MessageId},
+    futures::StreamExt as _,
 };
 
-use crate::{config, constant, outputter::Outputter};
+use crate::outputter::Outputter;
 
-use super::CommandHandler;
+pub mod app;
+pub mod slash;
 
-pub struct Handler {
-    discord_config: config::Discord,
-    cancel_rx: flume::Receiver<MessageId>,
-}
-impl Handler {
-    pub fn new(discord_config: config::Discord, cancel_rx: flume::Receiver<MessageId>) -> Self {
-        Self {
-            discord_config,
-            cancel_rx,
-        }
-    }
-}
-#[serenity::async_trait]
-impl CommandHandler for Handler {
-    fn name(&self) -> &str {
-        constant::commands::EXECUTE
-    }
+async fn run(
+    http: &Http,
+    cmd: &CommandInteraction,
+    discord_config: &crate::config::Discord,
+    cancel_rx: &flume::Receiver<MessageId>,
+    unparsed_code: &str,
+) -> anyhow::Result<()> {
+    let mut outputter = Outputter::new(
+        http,
+        cmd,
+        std::time::Duration::from_millis(discord_config.message_update_interval_ms),
+        "Executing...",
+    )
+    .await?;
+    let starting_message_id = outputter.starting_message_id();
 
-    async fn register(&self, http: &Http) -> anyhow::Result<()> {
-        Command::create_global_command(
-            http,
-            CreateCommand::new(constant::commands::EXECUTE).kind(CommandType::Message),
-        )
-        .await?;
-        Ok(())
-    }
+    let code = parse_markdown_lua_block(unparsed_code).with_context(|| "Invalid Lua code block")?;
 
-    async fn run(&self, http: &Http, cmd: &CommandInteraction) -> anyhow::Result<()> {
-        let messages = &cmd.data.resolved.messages;
+    let lua = create_lua_state()?;
+    let mut thread = load_async_expression::<Option<String>>(&lua, code)?;
 
-        let mut outputter = Outputter::new(
-            http,
-            cmd,
-            std::time::Duration::from_millis(self.discord_config.message_update_interval_ms),
-            "Executing...",
-        )
-        .await?;
-        let starting_message_id = outputter.starting_message_id();
-
-        let Some(code) = messages.values().next().map(|v| v.content.as_str()) else {
-            anyhow::bail!("no message found");
-        };
-        let code = parse_markdown_lua_block(code).with_context(|| "Invalid Lua code block")?;
-
-        let lua = create_lua_state()?;
-        let mut thread = load_async_expression::<Option<String>>(&lua, code)?;
-
-        let mut errored = false;
-        while let Some(result) = thread.next().await {
-            if let Ok(cancel_message_id) = self.cancel_rx.try_recv() {
-                if cancel_message_id == starting_message_id {
-                    outputter.cancelled().await?;
-                    errored = true;
-                    break;
-                }
-            }
-
-            match result {
-                Ok(result) => {
-                    if let Some(result) = result {
-                        outputter.update(&result).await?;
-                    }
-                }
-                Err(err) => {
-                    outputter.error(&err.to_string()).await?;
-                    errored = true;
-                    break;
-                }
+    let mut errored = false;
+    while let Some(result) = thread.next().await {
+        if let Ok(cancel_message_id) = cancel_rx.try_recv() {
+            if cancel_message_id == starting_message_id {
+                outputter.cancelled().await?;
+                errored = true;
+                break;
             }
         }
-        if !errored {
-            outputter.finish().await?;
-        }
 
-        Ok(())
+        match result {
+            Ok(result) => {
+                if let Some(result) = result {
+                    outputter.update(&result).await?;
+                }
+            }
+            Err(err) => {
+                outputter.error(&err.to_string()).await?;
+                errored = true;
+                break;
+            }
+        }
     }
+    if !errored {
+        outputter.finish().await?;
+    }
+
+    Ok(())
 }
 
 fn create_lua_state() -> mlua::Result<mlua::Lua> {
@@ -101,6 +75,13 @@ fn create_lua_state() -> mlua::Result<mlua::Lua> {
             tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
             Ok(())
         })?,
+    )?;
+
+    lua.globals().set(
+        "yield",
+        lua.globals()
+            .get("coroutine")
+            .and_then(|c: mlua::Table| c.get::<mlua::Function>("yield"))?,
     )?;
 
     Ok(lua)

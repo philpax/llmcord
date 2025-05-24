@@ -45,11 +45,16 @@ async fn main() -> anyhow::Result<()> {
                 ai.clone(),
             )) as Box<dyn commands::CommandHandler>
         })
-        .chain(std::iter::once(Box::new(commands::execute::Handler::new(
-            config.discord.clone(),
-            cancel_rx.clone(),
-        ))
-            as Box<dyn commands::CommandHandler>))
+        .chain([
+            Box::new(commands::execute::app::Handler::new(
+                config.discord.clone(),
+                cancel_rx.clone(),
+            )) as Box<dyn commands::CommandHandler>,
+            Box::new(commands::execute::slash::Handler::new(
+                config.discord.clone(),
+                cancel_rx.clone(),
+            )) as Box<dyn commands::CommandHandler>,
+        ])
         .map(|handler| (handler.name().to_string(), handler))
         .collect();
 
