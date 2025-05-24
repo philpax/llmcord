@@ -1,8 +1,12 @@
-use std::sync::Arc;
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 use serenity::{
     all::{CommandInteraction, Http, MessageId},
-    futures::StreamExt as _,
+    futures::{Stream, StreamExt as _},
 };
 
 use crate::{ai::Ai, config, outputter::Outputter};
@@ -48,11 +52,14 @@ impl Handler {
 
         let code = parse_markdown_lua_block(unparsed_code).unwrap_or(unparsed_code);
 
-        let lua = create_lua_state(self.ai.clone())?;
-        let mut thread = load_async_expression::<Option<String>>(&lua, code)?;
+        let (output_tx, output_rx) = flume::unbounded::<mlua::Result<Option<String>>>();
+
+        let lua = create_lua_state(self.ai.clone(), output_tx)?;
+        let thread = load_async_expression::<Option<String>>(&lua, code)?;
 
         let mut errored = false;
-        while let Some(result) = thread.next().await {
+        let mut stream = SelectUntilFirstEnds::new(thread, output_rx.stream());
+        while let Some(result) = stream.next().await {
             if let Ok(cancel_message_id) = self.cancel_rx.try_recv() {
                 if cancel_message_id == starting_message_id {
                     outputter.cancelled().await?;
@@ -82,7 +89,55 @@ impl Handler {
     }
 }
 
-fn create_lua_state(ai: Arc<Ai>) -> mlua::Result<mlua::Lua> {
+struct SelectUntilFirstEnds<S1, S2> {
+    primary: S1,
+    secondary: S2,
+    primary_ended: bool,
+}
+impl<S1, S2> SelectUntilFirstEnds<S1, S2> {
+    fn new(primary: S1, secondary: S2) -> Self {
+        Self {
+            primary,
+            secondary,
+            primary_ended: false,
+        }
+    }
+}
+impl<S1, S2, T> Stream for SelectUntilFirstEnds<S1, S2>
+where
+    S1: Stream<Item = T> + Unpin,
+    S2: Stream<Item = T> + Unpin,
+{
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.primary_ended {
+            return Poll::Ready(None);
+        }
+
+        // Always poll primary first for priority
+        match Pin::new(&mut self.primary).poll_next(cx) {
+            Poll::Ready(Some(item)) => return Poll::Ready(Some(item)),
+            Poll::Ready(None) => {
+                self.primary_ended = true;
+                return Poll::Ready(None);
+            }
+            Poll::Pending => {}
+        }
+
+        // Only poll secondary if primary is pending
+        match Pin::new(&mut self.secondary).poll_next(cx) {
+            Poll::Ready(Some(item)) => Poll::Ready(Some(item)),
+            Poll::Ready(None) => Poll::Pending, // Don't end if only secondary ends
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+fn create_lua_state(
+    ai: Arc<Ai>,
+    output_tx: flume::Sender<mlua::Result<Option<String>>>,
+) -> mlua::Result<mlua::Lua> {
     let lua = mlua::Lua::new_with(
         {
             use mlua::StdLib as SL;
@@ -91,7 +146,7 @@ fn create_lua_state(ai: Arc<Ai>) -> mlua::Result<mlua::Lua> {
         mlua::LuaOptions::new().catch_rust_panics(true),
     )?;
 
-    extensions::register(&lua, ai)?;
+    extensions::register(&lua, ai, output_tx)?;
 
     Ok(lua)
 }

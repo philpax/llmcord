@@ -1,4 +1,9 @@
-pub fn register(lua: &mlua::Lua) -> mlua::Result<()> {
+use std::sync::Arc;
+
+pub fn register(
+    lua: &mlua::Lua,
+    output_tx: flume::Sender<mlua::Result<Option<String>>>,
+) -> mlua::Result<()> {
     lua.globals().set(
         "sleep",
         lua.create_async_function(|_lua, ms: u32| async move {
@@ -18,6 +23,17 @@ pub fn register(lua: &mlua::Lua) -> mlua::Result<()> {
         "inspect",
         lua.load(include_str!("../../../../vendor/inspect.lua/inspect.lua"))
             .eval::<mlua::Value>()?,
+    )?;
+
+    lua.globals().set(
+        "print",
+        lua.create_function(move |_lua, value: mlua::Value| {
+            let output_tx = output_tx.clone();
+            output_tx
+                .send(Ok(Some(value.to_string()?)))
+                .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?;
+            Ok(())
+        })?,
     )?;
 
     Ok(())
