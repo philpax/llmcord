@@ -106,6 +106,12 @@ fn create_lua_state(models: &[String]) -> mlua::Result<mlua::Lua> {
 
     lua.globals().set("llm", create_llm_table(&lua, models)?)?;
 
+    lua.globals().set(
+        "inspect",
+        lua.load(include_str!("../../../vendor/inspect.lua/inspect.lua"))
+            .eval::<mlua::Value>()?,
+    )?;
+
     Ok(lua)
 }
 
