@@ -1,5 +1,8 @@
 use anyhow::Context as _;
-use serenity::all::{Command, CommandInteraction, CommandType, CreateCommand, Http, MessageId};
+use serenity::{
+    all::{Command, CommandInteraction, CommandType, CreateCommand, Http, MessageId},
+    futures::StreamExt,
+};
 
 use crate::{config, constant, outputter::Outputter};
 
@@ -47,10 +50,13 @@ impl CommandHandler for Handler {
         let Some(code) = messages.values().next().map(|v| v.content.as_str()) else {
             anyhow::bail!("no message found");
         };
-        let _code = parse_markdown_lua_block(code).with_context(|| "Invalid Lua code block")?;
+        let code = parse_markdown_lua_block(code).with_context(|| "Invalid Lua code block")?;
+
+        let lua = create_lua_state()?;
+        let mut thread = load_async_expression::<Option<String>>(&lua, code)?;
 
         let mut errored = false;
-        for i in 0..20 {
+        while let Some(result) = thread.next().await {
             if let Ok(cancel_message_id) = self.cancel_rx.try_recv() {
                 if cancel_message_id == starting_message_id {
                     outputter.cancelled().await?;
@@ -59,14 +65,91 @@ impl CommandHandler for Handler {
                 }
             }
 
-            outputter.update(&format!("Executing... {i}")).await?;
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            match result {
+                Ok(result) => {
+                    if let Some(result) = result {
+                        outputter.update(&result).await?;
+                    }
+                }
+                Err(err) => {
+                    outputter.error(&err.to_string()).await?;
+                    errored = true;
+                    break;
+                }
+            }
         }
         if !errored {
             outputter.finish().await?;
         }
 
         Ok(())
+    }
+}
+
+fn create_lua_state() -> mlua::Result<mlua::Lua> {
+    let lua = mlua::Lua::new_with(
+        {
+            use mlua::StdLib as SL;
+            SL::COROUTINE | SL::MATH | SL::STRING | SL::TABLE | SL::UTF8 | SL::VECTOR
+        },
+        mlua::LuaOptions::new().catch_rust_panics(true),
+    )?;
+
+    lua.globals().set(
+        "sleep",
+        lua.create_async_function(|_lua, ms: u32| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
+            Ok(())
+        })?,
+    )?;
+
+    Ok(lua)
+}
+
+fn load_async_expression<R: mlua::FromLuaMulti>(
+    lua: &mlua::Lua,
+    expression: &str,
+) -> anyhow::Result<mlua::AsyncThread<R>> {
+    let with_return = lua
+        .load(
+            format!(
+                r#"
+coroutine.create(function()
+    return {expression}
+end)
+"#
+            )
+            .trim(),
+        )
+        .eval::<mlua::Thread>()
+        .and_then(|t| t.into_async::<R>(()));
+
+    match with_return {
+        Ok(thread) => Ok(thread),
+        Err(with_return_err) => {
+            let without_return = lua
+                .load(
+                    format!(
+                        r#"
+coroutine.create(function()
+{expression}
+end)
+"#
+                    )
+                    .trim(),
+                )
+                .eval::<mlua::Thread>()
+                .and_then(|t| t.into_async::<R>(()));
+
+            match without_return {
+                Ok(thread) => Ok(thread),
+                Err(without_return_err) => {
+                    anyhow::bail!(
+                        "Failed to load expression with return: {with_return_err:?} | without return: {without_return_err:?}"
+                    );
+                }
+            }
+        }
     }
 }
 
