@@ -5,6 +5,7 @@ pub mod value {
     pub const MODEL: &str = "model";
 
     pub const MESSAGE_ID: &str = "message_id";
+    pub const CODE: &str = "code";
 }
 
 /// names of non-user-configurable commands

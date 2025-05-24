@@ -1,4 +1,3 @@
-use anyhow::Context as _;
 use serenity::{
     all::{CommandInteraction, Http, MessageId},
     futures::StreamExt as _,
@@ -25,7 +24,7 @@ async fn run(
     .await?;
     let starting_message_id = outputter.starting_message_id();
 
-    let code = parse_markdown_lua_block(unparsed_code).with_context(|| "Invalid Lua code block")?;
+    let code = parse_markdown_lua_block(unparsed_code).unwrap_or(unparsed_code);
 
     let lua = create_lua_state()?;
     let mut thread = load_async_expression::<Option<String>>(&lua, code)?;
