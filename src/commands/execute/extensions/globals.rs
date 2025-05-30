@@ -26,13 +26,14 @@ pub fn register(
     )?;
 
     lua.globals().set(
-        "print",
-        lua.create_function(move |_lua, value: mlua::Value| {
+        "output",
+        lua.create_function(move |_lua, values: mlua::Variadic<String>| {
             let output_tx = output_tx.clone();
+            let output = values.into_iter().collect::<Vec<_>>().join("\t");
             output_tx
-                .send(Ok(Some(value.to_string()?)))
+                .send(Ok(Some(output.clone())))
                 .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?;
-            Ok(())
+            Ok(output)
         })?,
     )?;
 
