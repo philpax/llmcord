@@ -125,6 +125,45 @@ pub fn register(lua: &mlua::Lua, ai: Arc<Ai>) -> mlua::Result<()> {
         })?,
     )?;
 
+    llm.set(
+        "response",
+        lua.create_async_function({
+            let client = ai.client.clone();
+            move |_lua, args: mlua::Table| {
+                let client = client.clone();
+                async move {
+                    let model = args.get::<String>("model")?;
+                    let seed = if args.contains_key("seed")? {
+                        args.get::<u32>("seed")?
+                    } else {
+                        0
+                    };
+                    let messages = args.get::<mlua::Table>("messages")?;
+
+                    let messages: Vec<ChatCompletionRequestMessage> = messages
+                        .sequence_values::<mlua::Table>()
+                        .map(|table| from_message_table_to_message(table?))
+                        .collect::<mlua::Result<Vec<_>>>()?;
+
+                    let response = client
+                        .chat()
+                        .create(
+                            async_openai::types::CreateChatCompletionRequestArgs::default()
+                                .model(model.clone())
+                                .seed(seed)
+                                .messages(messages)
+                                .build()
+                                .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?,
+                        )
+                        .await
+                        .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?;
+
+                    Ok(response.choices[0].message.content.clone())
+                }
+            }
+        })?,
+    )?;
+
     lua.globals().set("llm", llm)?;
 
     Ok(())
