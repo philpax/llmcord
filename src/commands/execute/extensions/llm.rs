@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_openai::types::{
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestUserMessage,
+    CreateChatCompletionRequestArgs,
 };
 use serenity::futures::StreamExt as _;
 
@@ -23,33 +24,10 @@ pub fn register(lua: &mlua::Lua, ai: Arc<Ai>) -> mlua::Result<()> {
             move |_lua, args: mlua::Table| {
                 let client = client.clone();
                 async move {
-                    let model = args.get::<String>("model")?;
-                    let seed = if args.contains_key("seed")? {
-                        args.get::<u32>("seed")?
-                    } else {
-                        0
-                    };
-                    let messages = args.get::<mlua::Table>("messages")?;
-                    let callback = args.get::<mlua::Function>("callback")?;
+                    let (model, seed, messages, callback) = parse_llm_args(&args)?;
+                    let callback = callback.expect("by_token requires a callback");
 
-                    let messages: Vec<ChatCompletionRequestMessage> = messages
-                        .sequence_values::<mlua::Table>()
-                        .map(|table| from_message_table_to_message(table?))
-                        .collect::<mlua::Result<Vec<_>>>()?;
-
-                    let mut stream = client
-                        .chat()
-                        .create_stream(
-                            async_openai::types::CreateChatCompletionRequestArgs::default()
-                                .model(model.clone())
-                                .seed(seed)
-                                .messages(messages)
-                                .stream(true)
-                                .build()
-                                .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?,
-                        )
-                        .await
-                        .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?;
+                    let mut stream = create_chat_stream(&client, &model, seed, messages).await?;
 
                     while let Some(response) = stream.next().await {
                         let Ok(response) = response else { continue };
@@ -76,33 +54,10 @@ pub fn register(lua: &mlua::Lua, ai: Arc<Ai>) -> mlua::Result<()> {
             move |_lua, args: mlua::Table| {
                 let client = client.clone();
                 async move {
-                    let model = args.get::<String>("model")?;
-                    let seed = if args.contains_key("seed")? {
-                        args.get::<u32>("seed")?
-                    } else {
-                        0
-                    };
-                    let messages = args.get::<mlua::Table>("messages")?;
-                    let callback = args.get::<mlua::Function>("callback")?;
+                    let (model, seed, messages, callback) = parse_llm_args(&args)?;
+                    let callback = callback.expect("stream requires a callback");
 
-                    let messages: Vec<ChatCompletionRequestMessage> = messages
-                        .sequence_values::<mlua::Table>()
-                        .map(|table| from_message_table_to_message(table?))
-                        .collect::<mlua::Result<Vec<_>>>()?;
-
-                    let mut stream = client
-                        .chat()
-                        .create_stream(
-                            async_openai::types::CreateChatCompletionRequestArgs::default()
-                                .model(model.clone())
-                                .seed(seed)
-                                .messages(messages)
-                                .stream(true)
-                                .build()
-                                .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?,
-                        )
-                        .await
-                        .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?;
+                    let mut stream = create_chat_stream(&client, &model, seed, messages).await?;
 
                     let mut output = String::new();
 
@@ -132,24 +87,13 @@ pub fn register(lua: &mlua::Lua, ai: Arc<Ai>) -> mlua::Result<()> {
             move |_lua, args: mlua::Table| {
                 let client = client.clone();
                 async move {
-                    let model = args.get::<String>("model")?;
-                    let seed = if args.contains_key("seed")? {
-                        args.get::<u32>("seed")?
-                    } else {
-                        0
-                    };
-                    let messages = args.get::<mlua::Table>("messages")?;
-
-                    let messages: Vec<ChatCompletionRequestMessage> = messages
-                        .sequence_values::<mlua::Table>()
-                        .map(|table| from_message_table_to_message(table?))
-                        .collect::<mlua::Result<Vec<_>>>()?;
+                    let (model, seed, messages, _) = parse_llm_args(&args)?;
 
                     let response = client
                         .chat()
                         .create(
-                            async_openai::types::CreateChatCompletionRequestArgs::default()
-                                .model(model.clone())
+                            CreateChatCompletionRequestArgs::default()
+                                .model(model)
                                 .seed(seed)
                                 .messages(messages)
                                 .build()
@@ -167,6 +111,63 @@ pub fn register(lua: &mlua::Lua, ai: Arc<Ai>) -> mlua::Result<()> {
     lua.globals().set("llm", llm)?;
 
     Ok(())
+}
+
+fn parse_llm_args(
+    args: &mlua::Table,
+) -> mlua::Result<(
+    String,
+    u32,
+    Vec<ChatCompletionRequestMessage>,
+    Option<mlua::Function>,
+)> {
+    let model = args.get::<String>("model")?;
+    let seed = if args.contains_key("seed")? {
+        args.get::<u32>("seed")?
+    } else {
+        0
+    };
+    let messages = args.get::<mlua::Table>("messages")?;
+    let callback = if args.contains_key("callback")? {
+        Some(args.get::<mlua::Function>("callback")?)
+    } else {
+        None
+    };
+
+    let messages: Vec<ChatCompletionRequestMessage> = messages
+        .sequence_values::<mlua::Table>()
+        .map(|table| from_message_table_to_message(table?))
+        .collect::<mlua::Result<Vec<_>>>()?;
+
+    Ok((model, seed, messages, callback))
+}
+
+async fn create_chat_stream(
+    client: &async_openai::Client<async_openai::config::OpenAIConfig>,
+    model: &str,
+    seed: u32,
+    messages: Vec<ChatCompletionRequestMessage>,
+) -> mlua::Result<
+    impl serenity::futures::Stream<
+        Item = Result<
+            async_openai::types::CreateChatCompletionStreamResponse,
+            async_openai::error::OpenAIError,
+        >,
+    >,
+> {
+    client
+        .chat()
+        .create_stream(
+            CreateChatCompletionRequestArgs::default()
+                .model(model)
+                .seed(seed)
+                .messages(messages)
+                .stream(true)
+                .build()
+                .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?,
+        )
+        .await
+        .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))
 }
 
 fn register_message(lua: &mlua::Lua, table: &mlua::Table, role: &str) -> mlua::Result<()> {
