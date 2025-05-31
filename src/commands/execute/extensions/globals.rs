@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 pub fn register(
     lua: &mlua::Lua,
-    output_tx: flume::Sender<mlua::Result<Option<String>>>,
+    output_tx: flume::Sender<String>,
+    print_tx: flume::Sender<String>,
 ) -> mlua::Result<()> {
     lua.globals().set(
         "sleep",
@@ -31,7 +32,19 @@ pub fn register(
             let output_tx = output_tx.clone();
             let output = values.into_iter().collect::<Vec<_>>().join("\t");
             output_tx
-                .send(Ok(Some(output.clone())))
+                .send(output.clone())
+                .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?;
+            Ok(output)
+        })?,
+    )?;
+
+    lua.globals().set(
+        "print",
+        lua.create_function(move |_lua, values: mlua::Variadic<String>| {
+            let print_tx = print_tx.clone();
+            let output = values.into_iter().collect::<Vec<_>>().join("\t");
+            print_tx
+                .send(output.clone())
                 .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?;
             Ok(output)
         })?,

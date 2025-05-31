@@ -1,12 +1,8 @@
-use std::{
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use std::sync::Arc;
 
 use serenity::{
     all::{CommandInteraction, Http, MessageId},
-    futures::{Stream, StreamExt as _},
+    futures::StreamExt as _,
 };
 
 use crate::{ai::Ai, config, outputter::Outputter};
@@ -52,35 +48,90 @@ impl Handler {
 
         let code = parse_markdown_lua_block(unparsed_code).unwrap_or(unparsed_code);
 
-        let (output_tx, output_rx) = flume::unbounded::<mlua::Result<Option<String>>>();
+        let (output_tx, output_rx) = flume::unbounded::<String>();
+        let (print_tx, print_rx) = flume::unbounded::<String>();
 
-        let lua = create_lua_state(self.ai.clone(), output_tx)?;
-        let thread = load_async_expression::<Option<String>>(&lua, code)?;
+        let lua = create_lua_state(self.ai.clone(), output_tx, print_tx)?;
+        let mut thread = load_async_expression::<Option<String>>(&lua, code)?;
 
-        let mut errored = false;
-        let mut stream = SelectUntilFirstEnds::new(thread, output_rx.stream());
-        while let Some(result) = stream.next().await {
-            if let Ok(cancel_message_id) = self.cancel_rx.try_recv() {
-                if cancel_message_id == starting_message_id {
-                    outputter.cancelled().await?;
-                    errored = true;
-                    break;
-                }
-            }
-
-            match result {
-                Ok(result) => {
-                    if let Some(result) = result {
-                        outputter.update(&result).await?;
+        struct Output {
+            output: String,
+            print_log: Vec<String>,
+        }
+        impl Output {
+            pub fn to_final_output(&self) -> String {
+                let mut output = self.output.clone();
+                if !self.print_log.is_empty() {
+                    output.push_str("\n**Print Log**\n");
+                    for print in self.print_log.iter() {
+                        output.push_str(print);
+                        output.push('\n');
                     }
                 }
-                Err(err) => {
-                    outputter.error(&err.to_string()).await?;
-                    errored = true;
+                output
+            }
+        }
+        let mut output = Output {
+            output: String::new(),
+            print_log: vec![],
+        };
+
+        let mut errored = false;
+        let mut cancel_stream = self.cancel_rx.stream();
+        let mut output_stream = output_rx.stream();
+        let mut print_stream = print_rx.stream();
+
+        loop {
+            tokio::select! {
+                biased;
+
+                // Check for cancellation (highest priority)
+                Some(cancel_message_id) = cancel_stream.next() => {
+                    if cancel_message_id == starting_message_id {
+                        outputter.cancelled().await?;
+                        errored = true;
+                        break;
+                    }
                     break;
+                }
+
+                // Handle values from output stream
+                Some(value) = output_stream.next() => {
+                    output.output = value;
+                    outputter.update(&output.to_final_output()).await?;
+                }
+
+                // Handle values from print stream
+                Some(value) = print_stream.next() => {
+                    output.print_log.push(value);
+                    outputter.update(&output.to_final_output()).await?;
+                }
+
+                // Handle thread stream
+                thread_result = thread.next() => {
+                    match thread_result {
+                        Some(Ok(result)) => {
+                            if let Some(result) = result {
+                                output.output = result;
+                                outputter.update(&output.to_final_output()).await?;
+                            } else {
+                                outputter.update(&output.to_final_output()).await?;
+                            }
+                        }
+                        Some(Err(err)) => {
+                            outputter.error(&err.to_string()).await?;
+                            errored = true;
+                            break;
+                        }
+                        None => {
+                            // Thread stream exhausted
+                            break;
+                        }
+                    }
                 }
             }
         }
+
         if !errored {
             outputter.finish().await?;
         }
@@ -89,54 +140,10 @@ impl Handler {
     }
 }
 
-struct SelectUntilFirstEnds<S1, S2> {
-    primary: S1,
-    secondary: S2,
-    primary_ended: bool,
-}
-impl<S1, S2> SelectUntilFirstEnds<S1, S2> {
-    fn new(primary: S1, secondary: S2) -> Self {
-        Self {
-            primary,
-            secondary,
-            primary_ended: false,
-        }
-    }
-}
-impl<S1, S2, T> Stream for SelectUntilFirstEnds<S1, S2>
-where
-    S1: Stream<Item = T> + Unpin,
-    S2: Stream<Item = T> + Unpin,
-{
-    type Item = T;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.primary_ended {
-            return Poll::Ready(None);
-        }
-
-        // Always poll primary first for priority
-        match Pin::new(&mut self.primary).poll_next(cx) {
-            Poll::Ready(Some(item)) => return Poll::Ready(Some(item)),
-            Poll::Ready(None) => {
-                self.primary_ended = true;
-                return Poll::Ready(None);
-            }
-            Poll::Pending => {}
-        }
-
-        // Only poll secondary if primary is pending
-        match Pin::new(&mut self.secondary).poll_next(cx) {
-            Poll::Ready(Some(item)) => Poll::Ready(Some(item)),
-            Poll::Ready(None) => Poll::Pending, // Don't end if only secondary ends
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
 fn create_lua_state(
     ai: Arc<Ai>,
-    output_tx: flume::Sender<mlua::Result<Option<String>>>,
+    output_tx: flume::Sender<String>,
+    print_tx: flume::Sender<String>,
 ) -> mlua::Result<mlua::Lua> {
     let lua = mlua::Lua::new_with(
         {
@@ -146,7 +153,7 @@ fn create_lua_state(
         mlua::LuaOptions::new().catch_rust_panics(true),
     )?;
 
-    extensions::register(&lua, ai, output_tx)?;
+    extensions::register(&lua, ai, output_tx, print_tx)?;
 
     Ok(lua)
 }
