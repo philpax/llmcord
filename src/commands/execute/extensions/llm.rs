@@ -52,10 +52,14 @@ pub fn register(lua: &mlua::Lua, ai: Arc<Ai>) -> mlua::Result<()> {
                         .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?;
 
                     while let Some(response) = stream.next().await {
-                        if let Ok(response) = response {
-                            if let Some(content) = &response.choices[0].delta.content {
-                                callback.call::<()>(content.clone())?;
-                            }
+                        let Ok(response) = response else { continue };
+                        let Some(content) = &response.choices[0].delta.content else {
+                            continue;
+                        };
+                        let value = callback.call::<mlua::Value>(content.clone())?;
+                        if value.as_boolean().is_some_and(|b| !b) {
+                            // Allow the user to cancel the stream by returning false
+                            break;
                         }
                     }
 
