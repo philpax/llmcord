@@ -69,6 +69,62 @@ pub fn register(lua: &mlua::Lua, ai: Arc<Ai>) -> mlua::Result<()> {
         })?,
     )?;
 
+    llm.set(
+        "stream",
+        lua.create_async_function({
+            let client = ai.client.clone();
+            move |_lua, args: mlua::Table| {
+                let client = client.clone();
+                async move {
+                    let model = args.get::<String>("model")?;
+                    let seed = if args.contains_key("seed")? {
+                        args.get::<u32>("seed")?
+                    } else {
+                        0
+                    };
+                    let messages = args.get::<mlua::Table>("messages")?;
+                    let callback = args.get::<mlua::Function>("callback")?;
+
+                    let messages: Vec<ChatCompletionRequestMessage> = messages
+                        .sequence_values::<mlua::Table>()
+                        .map(|table| from_message_table_to_message(table?))
+                        .collect::<mlua::Result<Vec<_>>>()?;
+
+                    let mut stream = client
+                        .chat()
+                        .create_stream(
+                            async_openai::types::CreateChatCompletionRequestArgs::default()
+                                .model(model.clone())
+                                .seed(seed)
+                                .messages(messages)
+                                .stream(true)
+                                .build()
+                                .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?,
+                        )
+                        .await
+                        .map_err(|e| mlua::Error::ExternalError(Arc::new(e)))?;
+
+                    let mut output = String::new();
+
+                    while let Some(response) = stream.next().await {
+                        let Ok(response) = response else { continue };
+                        let Some(content) = &response.choices[0].delta.content else {
+                            continue;
+                        };
+                        output.push_str(content);
+                        let value = callback.call::<mlua::Value>(output.clone())?;
+                        if value.as_boolean().is_some_and(|b| !b) {
+                            // Allow the user to cancel the stream by returning false
+                            break;
+                        }
+                    }
+
+                    Ok(())
+                }
+            }
+        })?,
+    )?;
+
     lua.globals().set("llm", llm)?;
 
     Ok(())
